@@ -14,7 +14,7 @@
   button { background: rgba(255,255,255,.14); color: #fff; border: 0; border-radius: 999px;
     padding: 9px 15px; font: inherit; cursor: pointer; }
   button:hover { background: rgba(255,255,255,.24); }
-  button.on { background: rgba(247,161,196,.5); }
+  button.on { background: rgba(140,208,245,.5); }
   #hint { position: fixed; z-index: 2; left: 16px; right: 16px; bottom: calc(env(safe-area-inset-bottom) + 16px);
     text-align: center; color: rgba(255,255,255,.6); pointer-events: none; transition: opacity 1.2s; line-height: 1.4; }
   #video { position: fixed; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
@@ -82,7 +82,7 @@ const DEFAULT_PARAMS = {
   grain: 0.003,     // fine surface grain
   wheel: 0.6,       // potter's wheel speed when ◎ Wheel is on
   mouseRate: 2.9,   // how fast a held mouse/touch presses in
-  stars: 260,       // pink "stars" in the background (reload to apply)
+  stars: 260,       // light blue "stars" in the background (reload to apply)
   starBlur: 0.5,    // how out of focus stars away from the clay's depth get
   starDim: 0.8,     // star brightness (kept below the clay)
   starSpin: 0.03,   // the star field turns slowly around the clay, so near and far stars drift apart (3D)
@@ -116,13 +116,13 @@ const pmrem = new THREE.PMREMGenerator(renderer);
 scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
 const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 100);
 
-scene.add(new THREE.HemisphereLight(0xffffff, 0x2a0c18, 0.35));
+scene.add(new THREE.HemisphereLight(0xffffff, 0x0c1e2a, 0.35));
 const key = new THREE.DirectionalLight(0xffffff, 2.6); key.position.set(-2.5, 3.5, 4);
 key.castShadow = true; key.shadow.mapSize.set(2048, 2048); key.shadow.normalBias = 0.025; key.shadow.radius = 4;
 Object.assign(key.shadow.camera, { left: -2.5, right: 2.5, top: 2.5, bottom: -2.5, near: 0.5, far: 15 });
 scene.add(key);
-const rim = new THREE.DirectionalLight(0xffa8d0, 1.6); rim.position.set(3.5, 1.5, -3); scene.add(rim);
-const fill = new THREE.DirectionalLight(0xffe6f0, 0.45); fill.position.set(3, -2, 3); scene.add(fill);
+const rim = new THREE.DirectionalLight(0xa8dcff, 1.6); rim.position.set(3.5, 1.5, -3); scene.add(rim);
+const fill = new THREE.DirectionalLight(0xe6f5ff, 0.45); fill.position.set(3, -2, 3); scene.add(fill);
 
 let W = 1, H = 1, dpr = 1;
 let starU = null;
@@ -140,7 +140,7 @@ function resize() {
 }
 addEventListener('resize', resize);
 
-// ---------- background: small pink "stars" at many depths, sharp near the clay's depth, blurred nearer or further ----------
+// ---------- background: small light blue "stars" at many depths, sharp near the clay's depth, blurred nearer or further ----------
 const starField = new THREE.Group();
 {
   const n = Math.round(P.stars), posA = new Float32Array(n * 3), size = new Float32Array(n), shade = new Float32Array(n);
@@ -161,7 +161,7 @@ const starField = new THREE.Group();
   g.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
   g.setAttribute('aShade', new THREE.BufferAttribute(shade, 1));
   starU = { uScale: { value: 1 }, uFocus: { value: camZ }, uBlur: { value: P.starBlur }, uDim: { value: P.starDim },
-    uColor: { value: new THREE.Color('#e0609a') } };
+    uColor: { value: new THREE.Color('#4fa8e0') } };
   const m = new THREE.ShaderMaterial({ uniforms: starU, transparent: true, depthWrite: false,
     vertexShader: `
       attribute float aSize; attribute float aShade;
@@ -295,8 +295,8 @@ function updateCavity() {
   geo.attributes.color.needsUpdate = true;
 }
 
-const mat = new THREE.MeshPhysicalMaterial({ color: new THREE.Color('#f58cb8'), roughness: 0.66, metalness: 0,
-  vertexColors: true, sheen: 0.45, sheenColor: new THREE.Color('#ffd3e4'), sheenRoughness: 0.55,
+const mat = new THREE.MeshPhysicalMaterial({ color: new THREE.Color('#6cc0f0'), roughness: 0.66, metalness: 0,
+  vertexColors: true, sheen: 0.45, sheenColor: new THREE.Color('#c4e8ff'), sheenRoughness: 0.55,
   clearcoat: 0.08, clearcoatRoughness: 0.5, envMapIntensity: 0.35 });
 const grainU = { value: P.grain };
 mat.onBeforeCompile = (sh) => {   // mottled colour, varied shine and fine grain that stick to the clay as it moves

@@ -1,6 +1,6 @@
 # Pink Clay
 
-Shape a block of pink clay with your hands through the camera. Single file: `index.html` (three.js + MediaPipe Hand Landmarker from CDN).
+Shape a block of light blue clay with your hands through the camera. Single file: `index.html` (three.js + MediaPipe Hand Landmarker from CDN).
 
 - Starts as a tall, rounded block, like clay out of the pack, already a little handled: slight lean and taper, lumps, a few old thumb marks. **New clay** makes a different one each time.
 - The hand skeleton is drawn over the scene. Each finger is **red**, and turns **green** while its fingertip touches the clay. A ring around the tip closes in as the finger gets near the clay.
@@ -12,7 +12,7 @@ Shape a block of pink clay with your hands through the camera. Single file: `ind
 - **It always turns very slowly** (idleSpin), faster with the wheel.
 - **The whole lump rounds off while you work it**, a little with every touch, the way real clay loses its corners.
 - **It moves in 3D:** a push from one side slides and turns the lump, and it drifts on a bit after you let go. Squeezing from both sides shapes it without moving it. Pressing toward the screen mostly dents. It slowly floats back to the middle.
-- **Background stars:** small, darker pink dots at many depths. Stars at the clay's depth are sharp, nearer and further ones are soft blurred discs (like a camera's depth of field), and the field turns slowly around the clay so near and far stars drift past each other.
+- **Background stars:** small, darker light blue dots at many depths. Stars at the clay's depth are sharp, nearer and further ones are soft blurred discs (like a camera's depth of field), and the field turns slowly around the clay so near and far stars drift past each other.
 - Buttons: **New clay**, **Wheel** (turns it like a potter's wheel). Mouse / touch also works: hold to press in, drag to push.
 
 ## Tuning
@@ -57,3 +57,5 @@ Add `?debug` for live numbers, +/- buttons per parameter (the address updates so
 Note: the debug panel must not have the id `dbg`. Element ids become globals, and MediaPipe calls a global `dbg()`, which crashes the hand model.
 
 Not yet verified with a real camera: the hand-distance values (sFar/sNear) are estimates for a laptop webcam at arm's length.
+
+Colours (changed from pink to light blue): clay `#6cc0f0` (was `#f58cb8`), sheen `#c4e8ff` (was `#ffd3e4`), stars `#4fa8e0` (was `#e0609a`), rim light `#a8dcff` (was `#ffa8d0`), fill light `#e6f5ff` (was `#ffe6f0`). The first try, `#8cd0f5`, looked almost white.
