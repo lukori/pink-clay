@@ -64,6 +64,7 @@ const DEFAULT_PARAMS = {
   steady: 0.35,     // hand tracking smoothing (lower = steadier but slower to follow)
   grabTurn: 1.0,    // two hands touching: how much turning the hands turns the clay
   grabMove: 0.8,    // two hands touching: how much moving the hands moves the clay
+  grabTwist: 1.0,   // two hands touching: tilting both hands forward/back (around the line between them) rolls the clay with them
   handRound: 0.04,  // two hands holding: moving/turning the hands rolls the clay rounder (no squeeze or stretch)
   idleSpin: 0.08,   // the clay always turns very slowly (rad/s)
   spread: 0.16,     // size of the clay region that moves with a fingertip push (solid-clay push, bigger = broader)
@@ -89,7 +90,7 @@ const DEFAULT_PARAMS = {
 const LIMITS = {
   sFar: [0.03, 0.4, 0.01], sNear: [0.05, 0.6, 0.01], pushRange: [0.5, 5, 0.1], fingerDepth: [0, 8, 0.25],
   zStart: [0.8, 3, 0.1], tipR: [0.05, 0.4, 0.01], give: [0.05, 1, 0.05], steady: [0.05, 1, 0.05],
-  grabTurn: [0, 2, 0.1], grabMove: [0, 2, 0.1], handRound: [0, 0.3, 0.01], idleSpin: [0, 1, 0.02], direct: [0, 1, 0.05],
+  grabTurn: [0, 2, 0.1], grabMove: [0, 2, 0.1], grabTwist: [0, 3, 0.1], handRound: [0, 0.3, 0.01], idleSpin: [0, 1, 0.02], direct: [0, 1, 0.05],
   spread: [0.05, 0.5, 0.01], rounding: [0, 0.06, 0.002], volKeep: [0, 1, 0.05], bulge: [0.15, 1.5, 0.05], overall: [0, 1, 0.05],
   smooth: [0, 1, 0.05], mobility: [0, 1, 0.05], turn: [0, 2, 0.05], drag: [0.2, 10, 0.1], home: [0, 4, 0.1],
   cavity: [0, 0.5, 0.01], grain: [0, 0.03, 0.001], wheel: [0, 3, 0.1], mouseRate: [0.3, 5, 0.1],
@@ -544,7 +545,7 @@ function moveBody(tLocal, thLocal, dt, touching) {
     wTmp.copy(thLocal).applyQuaternion(clay.quaternion);
     rotateWorld(wTmp);
     body.ang.lerp(wTmp.divideScalar(sdt), 0.35);
-  } else {
+  } else if (!grab.on) {   // while both hands hold it, the hands alone move it (momentum is kept for the release)
     clay.position.addScaledVector(body.vel, dt);
     rotateWorld(wTmp.copy(body.ang).multiplyScalar(dt));
     const k = Math.exp(-P.drag * dt);
@@ -556,14 +557,15 @@ function moveBody(tLocal, thLocal, dt, touching) {
 }
 
 // ---------- both hands on the clay: hold it, turn it, move it, roll it rounder ----------
-const grab = { on: false, axis: null, mid: null, len: 0, sm: {} };
+const grab = { on: false, axis: null, mid: null, len: 0, sm: {}, up: {}, twist: 0 };
+const handUp = {};   // per hand: wrist -> middle knuckle direction in 3D (screen px, mirrored), shows how the hand is tilted
 function updateGrab(fingers, dt) {
   const groups = {};
   for (const f of fingers) if (f.hand) (groups[f.hand] = groups[f.hand] || []).push(f);
   const keys = Object.keys(groups).sort();
   const need = grab.on ? 1 : 2;   // grab with two fingers of each hand, keep holding with one
   const holding = keys.length >= 2 && keys.slice(0, 2).every(k => groups[k].filter(f => f.st.touch).length >= need);
-  if (!holding) { grab.on = false; grab.axis = null; grab.sm = {}; return; }
+  if (!holding) { grab.on = false; grab.axis = null; grab.sm = {}; grab.up = {}; return; }
   const cs = keys.slice(0, 2).map(k => {
     const c = new THREE.Vector3(), p = new THREE.Vector3();
     for (const f of groups[k]) c.add(rayPoint(f.sx, f.sy, f.st.z, p));
@@ -597,6 +599,24 @@ function updateGrab(fingers, dt) {
       const m = 1 / (s1 - s0), i3 = 3*i;
       pos[i3] += (sx*m - pos[i3]) * a; pos[i3+1] += (sy*m - pos[i3+1]) * a; pos[i3+2] += (sz*m - pos[i3+2]) * a;
     }
+  }
+  // twist: both hands tilting around the line between them (like rolling a ball forward) turns the clay around that line
+  let twSum = 0, twN = 0;
+  for (const k of keys.slice(0, 2)) {
+    const u = handUp[k]; if (!u) continue;
+    const pr = u.clone().addScaledVector(axis, -u.dot(axis));
+    if (pr.lengthSq() < 1e-6) continue;
+    pr.normalize();
+    const prev = grab.up[k];
+    if (prev && grab.axis) { twSum += Math.atan2(axis.dot(new THREE.Vector3().crossVectors(prev, pr)), prev.dot(pr)); twN++; }
+    grab.up[k] = pr;
+  }
+  grab.twist = 0;
+  if (twN) {
+    const tw = Math.max(-0.2, Math.min(0.2, twSum / twN * P.grabTwist));
+    grab.twist = tw;
+    clay.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(axis, tw)).normalize();
+    body.ang.addScaledVector(axis, tw / Math.max(dt, 1 / 120) * 0.3);
   }
   grab.on = true; grab.axis = axis; grab.mid = mid; grab.len = len;
 }
@@ -685,6 +705,11 @@ function gatherFingers(dt) {
     const s = palm[label];
     const push = Math.max(0, Math.min(1, (s - P.sFar) / (P.sNear - P.sFar))) * P.pushRange;
     const info = { label, s, push, pts: lm.map(toScreen), fingers: [] };
+    {   // how the hand is tilted: wrist -> middle knuckle, with depth from the model (same scale as the image width)
+      const dispW = Math.max(W, H * (vw / vh));
+      const up = new THREE.Vector3(info.pts[9][0] - info.pts[0][0], -(info.pts[9][1] - info.pts[0][1]), (lm[9].z - lm[0].z) * dispW).normalize();
+      handUp[label] = handUp[label] ? handUp[label].lerp(up, a).normalize() : up;
+    }
     TIPS.forEach((ti, fi) => {
       const st = getState(label + fi);
       const zt = Math.max(-1.8, P.zStart - push + lm[ti].z * P.fingerDepth);
@@ -705,6 +730,7 @@ function gatherFingers(dt) {
   for (const f of (window.__fakeFingers || [])) {   // test hook: [{key, sx, sy, z}]
     const st = getState('fake' + f.key); st.z = f.z;
     fingers.push({ sx: f.sx, sy: f.sy, st, mouse: true, hand: f.hand });
+    if (f.hand && f.up) handUp[f.hand] = new THREE.Vector3(...f.up).normalize();   // test hook: hand tilt
   }
   for (const [k, st] of fingerState) if (!st.seen) fingerState.delete(k);
   return fingers;
@@ -781,7 +807,7 @@ function sampleLog(t) {
   const fmt = st => `z=${st.z.toFixed(2)}${st.touch ? '*' : ''}`;
   const p = clay.position;
   let s = `t=${t.toFixed(2)} fps=${fps.toFixed(0)} det=${detMs.toFixed(1)}ms vol=${volRatio.toFixed(3)} hands=${handInfo.length}` +
-    ` contacts=${contactCount} share=${lastShare.toFixed(2)} pos=${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)} spin=${body.ang.length().toFixed(2)} grab=${grab.on ? 1 : 0}`;
+    ` contacts=${contactCount} share=${lastShare.toFixed(2)} pos=${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)} spin=${body.ang.length().toFixed(2)} grab=${grab.on ? 1 : 0} twist=${grab.twist.toFixed(3)}`;
   for (const h of handInfo) s += `\n  ${h.label} palm=${h.s.toFixed(3)} push=${h.push.toFixed(2)} | ${h.fingers.map(fmt).join(' ')}`;
   const m = fingerState.get('mouse'); if (m) s += `\n  mouse ${fmt(m)}`;
   logLines.push(s); if (logLines.length > 2400) logLines.shift();
