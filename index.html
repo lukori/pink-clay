@@ -81,6 +81,10 @@ const DEFAULT_PARAMS = {
   grain: 0.003,     // fine surface grain
   wheel: 0.6,       // potter's wheel speed when ◎ Wheel is on
   mouseRate: 2.9,   // how fast a held mouse/touch presses in
+  stars: 260,       // pink "stars" in the background (reload to apply)
+  starBlur: 0.5,    // how out of focus stars away from the clay's depth get
+  starDim: 0.8,     // star brightness (kept below the clay)
+  starSpin: 0.03,   // the star field turns slowly around the clay, so near and far stars drift apart (3D)
 };
 const LIMITS = {
   sFar: [0.03, 0.4, 0.01], sNear: [0.05, 0.6, 0.01], pushRange: [0.5, 5, 0.1], fingerDepth: [0, 8, 0.25],
@@ -89,6 +93,7 @@ const LIMITS = {
   spread: [0.05, 0.5, 0.01], rounding: [0, 0.06, 0.002], volKeep: [0, 1, 0.05], bulge: [0.15, 1.5, 0.05], overall: [0, 1, 0.05],
   smooth: [0, 1, 0.05], mobility: [0, 1, 0.05], turn: [0, 2, 0.05], drag: [0.2, 10, 0.1], home: [0, 4, 0.1],
   cavity: [0, 0.5, 0.01], grain: [0, 0.03, 0.001], wheel: [0, 3, 0.1], mouseRate: [0.3, 5, 0.1],
+  stars: [0, 1000, 20], starBlur: [0, 1.5, 0.05], starDim: [0, 1, 0.05], starSpin: [0, 0.3, 0.01],
 };
 const qs = new URLSearchParams(location.search);
 const DEBUG = qs.has('debug');
@@ -119,6 +124,7 @@ const rim = new THREE.DirectionalLight(0xffa8d0, 1.6); rim.position.set(3.5, 1.5
 const fill = new THREE.DirectionalLight(0xffe6f0, 0.45); fill.position.set(3, -2, 3); scene.add(fill);
 
 let W = 1, H = 1, dpr = 1;
+let starU = null;
 function resize() {
   W = innerWidth; H = innerHeight; dpr = Math.min(devicePixelRatio, 2);
   renderer.setSize(W, H, false);
@@ -128,9 +134,62 @@ function resize() {
   camera.lookAt(0, 0, 0);
   camera.updateProjectionMatrix();
   skel.width = W * dpr; skel.height = H * dpr;
+  if (starU) starU.uScale.value = H * renderer.getPixelRatio() / (2 * Math.tan(THREE.MathUtils.degToRad(15)));
   sk.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
-addEventListener('resize', resize); resize();
+addEventListener('resize', resize);
+
+// ---------- background: small pink "stars" at many depths, sharp near the clay's depth, blurred nearer or further ----------
+const starField = new THREE.Group();
+{
+  const n = Math.round(P.stars), posA = new Float32Array(n * 3), size = new Float32Array(n), shade = new Float32Array(n);
+  const camZ = 1.8 / Math.tan(THREE.MathUtils.degToRad(15));
+  for (let i = 0; i < n; i++) {
+    let x, y, z;
+    do {
+      const d = 1.5 + Math.pow(Math.random(), 0.8) * 26;   // distance from the camera
+      const half = Math.tan(THREE.MathUtils.degToRad(15)) * d * 1.6;   // a bit wider than the view, for turning
+      z = camZ - d; x = (Math.random() * 2 - 1) * half * 1.4; y = (Math.random() * 2 - 1) * half;
+    } while (Math.hypot(x, y, z) < 1.9 || (z > 1.2 && Math.hypot(x, y) < 1.7));   // keep clear of the clay
+    posA.set([x, y, z], 3 * i);
+    size[i] = 0.035 + Math.pow(Math.random(), 2) * 0.07;
+    shade[i] = 0.35 + Math.random() * 0.65;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(posA, 3));
+  g.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
+  g.setAttribute('aShade', new THREE.BufferAttribute(shade, 1));
+  starU = { uScale: { value: 1 }, uFocus: { value: camZ }, uBlur: { value: P.starBlur }, uDim: { value: P.starDim },
+    uColor: { value: new THREE.Color('#e0609a') } };
+  const m = new THREE.ShaderMaterial({ uniforms: starU, transparent: true, depthWrite: false,
+    vertexShader: `
+      attribute float aSize; attribute float aShade;
+      uniform float uScale, uFocus, uBlur;
+      varying float vSoft, vAlpha;
+      void main() {
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        float dist = -mv.z;
+        float core = max(aSize * uScale / dist, 2.5);                      // size in pixels if it were in focus
+        float blur = abs(dist - uFocus) * uBlur * 0.04 * uScale / dist; // circle of confusion, pixels
+        float total = min(core + blur * 2.0, 160.0);
+        gl_PointSize = total;
+        vSoft = clamp(blur * 2.0 / max(total, 1.0), 0.06, 1.0);
+        vAlpha = aShade * clamp(pow(core / max(total, 1.0), 0.8) * 1.4, 0.14, 1.0);   // blur spreads the same light thinner
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: `
+      uniform vec3 uColor; uniform float uDim;
+      varying float vSoft, vAlpha;
+      void main() {
+        float d = length(gl_PointCoord - 0.5) * 2.0;
+        float a = 1.0 - smoothstep(1.0 - vSoft, 1.0, d);
+        if (a <= 0.0) discard;
+        gl_FragColor = vec4(uColor * (0.55 + 0.45 * vAlpha), a * vAlpha * uDim);
+      }` });
+  starField.add(new THREE.Points(g, m));
+  scene.add(starField);
+}
+resize();
 
 // ---------- clay mesh: a block of clay (rounded box), subdivided evenly ----------
 const HX = 0.62, HY = 0.82, HZ = 0.52;   // half sizes: a tall block, like clay out of the pack
@@ -748,6 +807,9 @@ function frame(now) {
   camLocal.copy(camera.position).applyMatrix4(inv);
   sculpt(fingers, dt);
   drawSkeleton(fingers);
+  starField.rotation.y += P.starSpin * dt;
+  starField.rotation.x = Math.sin(now * 0.00007) * 0.12;
+  starU.uBlur.value = P.starBlur; starU.uDim.value = P.starDim;
   renderer.render(scene, camera);
   if (!hintGone && fingers.length) { hintGone = true; setTimeout(() => hint.style.opacity = 0, 2500); }
   if (now - lastLog > 250) { lastLog = now; sampleLog((now - t0) / 1000); }

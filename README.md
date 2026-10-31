@@ -12,6 +12,7 @@ Shape a block of pink clay with your hands through the camera. Single file: `ind
 - **It always turns very slowly** (idleSpin), faster with the wheel.
 - **The whole lump rounds off while you work it**, a little with every touch, the way real clay loses its corners.
 - **It moves in 3D:** a push from one side slides and turns the lump, and it drifts on a bit after you let go. Squeezing from both sides shapes it without moving it. Pressing toward the screen mostly dents. It slowly floats back to the middle.
+- **Background stars:** small, darker pink dots at many depths. Stars at the clay's depth are sharp, nearer and further ones are soft blurred discs (like a camera's depth of field), and the field turns slowly around the clay so near and far stars drift past each other.
 - Buttons: **New clay**, **Wheel** (turns it like a potter's wheel). Mouse / touch also works: hold to press in, drag to push.
 
 ## Tuning
@@ -46,6 +47,10 @@ Add `?debug` for live numbers, +/- buttons per parameter (the address updates so
 | cavity | 0.2 (your tuning, was 0.05) | darkening inside dents and folds |
 | grain | 0.003 | fine surface grain (0.02 looked like a towel) |
 | wheel | 0.6 | wheel speed |
+| stars | 260 | number of background stars (reload to apply) |
+| starBlur | 0.5 | how out of focus stars away from the clay's depth get |
+| starDim | 0.8 | star brightness (kept below the clay; 0.45 was nearly invisible) |
+| starSpin | 0.03 | how fast the star field turns around the clay (the 3D drift) |
 | mouseRate | 2.9 (your tuning, was 1.5) | how fast a held mouse/touch presses in |
 
 Note: the debug panel must not have the id `dbg`. Element ids become globals, and MediaPipe calls a global `dbg()`, which crashes the hand model.
