@@ -39,7 +39,7 @@
 </div>
 <div id="debugPanel"><div id="stats"></div><div id="params"></div>
   <div class="row"><button id="saveLog">Save log</button><button id="copyLog">Copy log</button></div></div>
-<div id="hint">Start the camera and hold your hand up.<br>Bring your hand closer to the camera to press into the clay. Push it to move and turn it, squeeze it from both sides.</div>
+<div id="hint">Start the camera and hold your hand up.<br>Bring your hand closer to the camera to press into the clay. Push it to move and turn it. Hold it with both hands to turn it and roll it rounder.</div>
 
 <script type="importmap">
 { "imports": {
@@ -60,11 +60,12 @@ const DEFAULT_PARAMS = {
   fingerDepth: 3.0, // extra depth from each fingertip leaning toward the camera
   zStart: 1.4,      // depth of a far hand (the block's front is around 0.6)
   tipR: 0.13,       // fingertip size (the soft press area is 1.8x this)
-  give: 0.4,        // how much the clay follows a finger moving into it (only movement presses, holding still does nothing)
+  give: 0.25,       // how much the clay follows a finger moving into it (only movement presses, holding still does nothing)
   steady: 0.35,     // hand tracking smoothing (lower = steadier but slower to follow)
   grabTurn: 1.0,    // two hands touching: how much turning the hands turns the clay
   grabMove: 0.8,    // two hands touching: how much moving the hands moves the clay
-  squeeze: 0.5,     // two hands touching: hands closer = clay squeezed thinner and wider
+  handRound: 0.04,  // two hands holding: moving/turning the hands rolls the clay rounder (no squeeze or stretch)
+  idleSpin: 0.08,   // the clay always turns very slowly (rad/s)
   spread: 0.16,     // size of the clay region that moves with a fingertip push (solid-clay push, bigger = broader)
   direct: 0.3,      // share of the push that presses straight in under the fingertip (finger-shaped marks)
   rounding: 0.006,  // pressing slowly rounds off the whole lump (the more you press, the rounder)
@@ -84,7 +85,7 @@ const DEFAULT_PARAMS = {
 const LIMITS = {
   sFar: [0.03, 0.4, 0.01], sNear: [0.05, 0.6, 0.01], pushRange: [0.5, 5, 0.1], fingerDepth: [0, 8, 0.25],
   zStart: [0.8, 3, 0.1], tipR: [0.05, 0.4, 0.01], give: [0.05, 1, 0.05], steady: [0.05, 1, 0.05],
-  grabTurn: [0, 2, 0.1], grabMove: [0, 2, 0.1], squeeze: [0, 2, 0.1], direct: [0, 1, 0.05],
+  grabTurn: [0, 2, 0.1], grabMove: [0, 2, 0.1], handRound: [0, 0.3, 0.01], idleSpin: [0, 1, 0.02], direct: [0, 1, 0.05],
   spread: [0.05, 0.5, 0.01], rounding: [0, 0.06, 0.002], volKeep: [0, 1, 0.05], bulge: [0.15, 1.5, 0.05], overall: [0, 1, 0.05],
   smooth: [0, 1, 0.05], mobility: [0, 1, 0.05], turn: [0, 2, 0.05], drag: [0.2, 10, 0.1], home: [0, 4, 0.1],
   cavity: [0, 0.5, 0.01], grain: [0, 0.03, 0.001], wheel: [0, 3, 0.1], mouseRate: [0.3, 5, 0.1],
@@ -491,11 +492,11 @@ function moveBody(tLocal, thLocal, dt, touching) {
     body.vel.multiplyScalar(k); body.ang.multiplyScalar(k);
     body.vel.addScaledVector(clay.position, -P.home * dt);
   }
-  if (wheelOn) rotateWorld(wTmp.set(0, P.wheel * dt, 0));
+  rotateWorld(wTmp.set(0, ((wheelOn ? P.wheel : 0) + P.idleSpin) * dt, 0));   // always a slow turn, faster with the wheel
   if (clay.position.length() > 1.6) clay.position.setLength(1.6);
 }
 
-// ---------- both hands on the clay: hold it, turn it, move it, squeeze or stretch the whole shape ----------
+// ---------- both hands on the clay: hold it, turn it, move it, roll it rounder ----------
 const grab = { on: false, axis: null, mid: null, len: 0, sm: {} };
 function updateGrab(fingers, dt) {
   const groups = {};
@@ -528,16 +529,14 @@ function updateGrab(fingers, dt) {
     if (spin.lengthSq() > 1e-12) spin.setLength(ang / sdt);
     body.vel.lerp(moved.divideScalar(sdt), 0.3);
     body.ang.lerp(spin, 0.3);
-    // squeeze / stretch: along the hands' line by the change in their distance, the other way to keep the volume
-    let ratio = Math.pow(len / grab.len, P.squeeze);
-    ratio = Math.max(0.985, Math.min(1.015, ratio));
-    if (Math.abs(ratio - 1) > 1e-4) {
-      const a = axis.clone().applyQuaternion(clay.quaternion.clone().invert()), perp = 1 / Math.sqrt(ratio);
-      for (let i3 = 0; i3 < 3*N; i3 += 3) {
-        const al = pos[i3]*a.x + pos[i3+1]*a.y + pos[i3+2]*a.z;
-        const px = pos[i3] - a.x*al, py = pos[i3+1] - a.y*al, pz = pos[i3+2] - a.z*al;
-        pos[i3] = a.x*al*ratio + px*perp; pos[i3+1] = a.y*al*ratio + py*perp; pos[i3+2] = a.z*al*ratio + pz*perp;
-      }
+    // rolling it between the hands rounds it off, by how much the hands move (not by time); it never squeezes or stretches
+    const motion = moved.length() * sdt + ang + Math.abs(len - grab.len);
+    const a = Math.min(0.15, P.handRound * motion / 0.01);
+    if (a > 1e-4) for (let i = 0; i < N; i++) {
+      let sx = 0, sy = 0, sz = 0; const s0 = nbStart[i], s1 = nbStart[i+1];
+      for (let q2 = s0; q2 < s1; q2++) { const j = 3*nbList[q2]; sx += pos[j]; sy += pos[j+1]; sz += pos[j+2]; }
+      const m = 1 / (s1 - s0), i3 = 3*i;
+      pos[i3] += (sx*m - pos[i3]) * a; pos[i3+1] += (sy*m - pos[i3+1]) * a; pos[i3+2] += (sz*m - pos[i3+2]) * a;
     }
   }
   grab.on = true; grab.axis = axis; grab.mid = mid; grab.len = len;

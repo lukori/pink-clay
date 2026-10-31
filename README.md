@@ -8,7 +8,8 @@ Shape a block of pink clay with your hands through the camera. Single file: `ind
 - **Only pressing changes the clay, not time:** clay moves only when a finger moves further into it. Holding a finger still inside changes nothing. The fingertip is a soft round pad (the middle pushes fully, the edge fades), and the clay follows by `give`. Rounding and smoothing also come from pressing, not from time. Hand tracking is smoothed (steady).
 - **It behaves as one solid lump:** every push moves the clay like a nearly incompressible solid (a "Kelvinlet": the physics of pushing an elastic block at one point, made permanent). Neighbouring clay moves together, so it dents, smears and bulges but never tears into sheets or strings. Only a small part (direct) presses straight in under the fingertip, along the surface normal, never sideways.
 - **Dents go inward, the shape changes overall:** Pushed-in clay mostly flows into the whole lump's shape rather than a rim around the finger (overall). Dents and folds get darker inside, and the lump casts shadows on itself.
-- **Both hands on the clay = holding it:** with two fingers of each hand touching (palm lines turn green), turning your hands turns the clay, moving them moves it, and bringing them closer squeezes it thinner and wider (further apart stretches it). While held, fingers press in gently.
+- **Both hands on the clay = holding it:** with two fingers of each hand touching (palm lines turn green), turning your hands turns the clay and moving them moves it. Rolling it between the hands rounds it off (by how much the hands move, not by time). Two hands never squeeze or stretch it (`squeeze` 0.5 removed). While held, fingers press in gently.
+- **It always turns very slowly** (idleSpin), faster with the wheel.
 - **The whole lump rounds off while you work it**, a little with every touch, the way real clay loses its corners.
 - **It moves in 3D:** a push from one side slides and turns the lump, and it drifts on a bit after you let go. Squeezing from both sides shapes it without moving it. Pressing toward the screen mostly dents. It slowly floats back to the middle.
 - Buttons: **New clay**, **Wheel** (turns it like a potter's wheel). Mouse / touch also works: hold to press in, drag to push.
@@ -25,11 +26,12 @@ Add `?debug` for live numbers, +/- buttons per parameter (the address updates so
 | fingerDepth | 3.0 | extra depth from a fingertip leaning toward the camera |
 | zStart | 1.4 | depth of a far hand (block front is around 0.6) |
 | tipR | 0.13 | fingertip size |
-| give | 0.4 (firmer clay; was 0.75) | how much the clay follows a finger moving into it (replaced the time-based `pressSpeed` 0.35, which kept pressing while a finger stood still) |
+| give | 0.25 (more rigid; was 0.4, before that 0.75) | how much the clay follows a finger moving into it (replaced the time-based `pressSpeed` 0.35, which kept pressing while a finger stood still) |
 | steady | 0.35 | hand tracking smoothing, lower = steadier |
 | grabTurn | 1.0 | two hands: how much turning the hands turns the clay |
 | grabMove | 0.8 | two hands: how much moving the hands moves the clay |
-| squeeze | 0.5 (firmer clay; was 0.8) | two hands: how strongly hand distance squeezes/stretches the shape |
+| handRound | 0.04 | two hands: how much rolling between the hands rounds the clay (replaced squeeze/stretch) |
+| idleSpin | 0.08 | constant slow turn, rad/s (about 4.6° per second) |
 | spread | 0.16 | size of the clay region that moves with a push (solid-clay push; was a 0.32 per-point soft spread) |
 | direct | 0.3 | share of the push pressed straight into the surface under the fingertip (finger-shaped marks) |
 | rounding | 0.006 (firmer clay; was 0.012) | how much pressing rounds off the whole lump |
