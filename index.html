@@ -52,7 +52,7 @@ import * as THREE from 'three';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
-// ---------- tunable parameters (URL overrides: ?tipR=0.15&pressSpeed=0.5, ?debug for the overlay) ----------
+// ---------- tunable parameters (URL overrides: ?tipR=0.15&give=0.6, ?debug for the overlay) ----------
 const DEFAULT_PARAMS = {
   sFar: 0.11,       // palm size (share of camera height) where fingers float in front of the clay
   sNear: 0.20,      // palm size where fingers reach the full push depth
@@ -60,14 +60,14 @@ const DEFAULT_PARAMS = {
   fingerDepth: 3.0, // extra depth from each fingertip leaning toward the camera
   zStart: 1.4,      // depth of a far hand (the block's front is around 0.6)
   tipR: 0.13,       // fingertip size (the soft press area is 1.8x this)
-  pressSpeed: 0.35, // how fast clay gives way under a finger, per second: time makes the dent
+  give: 0.75,       // how much the clay follows a finger moving into it (only movement presses, holding still does nothing)
   steady: 0.35,     // hand tracking smoothing (lower = steadier but slower to follow)
   grabTurn: 1.0,    // two hands touching: how much turning the hands turns the clay
   grabMove: 0.8,    // two hands touching: how much moving the hands moves the clay
   squeeze: 0.8,     // two hands touching: hands closer = clay squeezed thinner and wider
   soft: 0.55,       // how much the clay around a fingertip goes along with it (deeper, softer dents)
   spread: 0.32,     // how wide that soft area is
-  rounding: 0.012,  // while touched, the whole lump slowly rounds off (per touching finger)
+  rounding: 0.012,  // pressing slowly rounds off the whole lump (the more you press, the rounder)
   volKeep: 0.35,    // how fast pushed-in clay comes back out somewhere (keeps the amount of clay)
   bulge: 1.0,       // how far around the finger the returning clay is focused
   overall: 0.7,     // share of returning clay that goes into the whole lump's shape instead of a rim by the finger
@@ -83,7 +83,7 @@ const DEFAULT_PARAMS = {
 };
 const LIMITS = {
   sFar: [0.03, 0.4, 0.01], sNear: [0.05, 0.6, 0.01], pushRange: [0.5, 5, 0.1], fingerDepth: [0, 8, 0.25],
-  zStart: [0.8, 3, 0.1], tipR: [0.05, 0.4, 0.01], pressSpeed: [0.05, 3, 0.05], steady: [0.05, 1, 0.05],
+  zStart: [0.8, 3, 0.1], tipR: [0.05, 0.4, 0.01], give: [0.05, 1, 0.05], steady: [0.05, 1, 0.05],
   grabTurn: [0, 2, 0.1], grabMove: [0, 2, 0.1], squeeze: [0, 2, 0.1], soft: [0, 1, 0.05],
   spread: [0.1, 0.8, 0.02], rounding: [0, 0.06, 0.002], volKeep: [0, 1, 0.05], bulge: [0.15, 1.5, 0.05], overall: [0, 1, 0.05],
   smooth: [0, 1, 0.05], mobility: [0, 1, 0.05], turn: [0, 2, 0.05], drag: [0.2, 10, 0.1], home: [0, 4, 0.1],
@@ -286,7 +286,7 @@ function rayPoint(sx, sy, zPlane, out) {   // point on the camera ray through a 
 
 let lastShare = 0, contactCount = 0;
 function sculpt(fingers, dt) {
-  for (let i = 0; i < N; i++) heat[i] *= 0.9;
+  for (let i = 0; i < N; i++) heat[i] *= 0.7;
   touched.fill(0); disp.fill(0);
   let maxR2 = 0;
   for (let i = 0; i < 3*N; i += 3) { const d = pos[i]*pos[i] + pos[i+1]*pos[i+1] + pos[i+2]*pos[i+2]; if (d > maxR2) maxR2 = d; }
@@ -302,11 +302,14 @@ function sculpt(fingers, dt) {
     if (!st.prevW) st.prevW = rayPoint(f.sx, f.sy, P.zStart + 0.4, new THREE.Vector3());
     prev.copy(st.prevW).applyMatrix4(inv);
     const n = Math.min(10, Math.max(1, Math.ceil(prev.distanceTo(tip) / (r * 0.4))));
-    // clay gives way over time, not all at once; holding with both hands presses gently so turning doesn't carve
-    const step = P.pressSpeed * (grab.on ? 0.35 : 1) * dt / n;
+    // only moving into the clay presses it; holding with both hands presses gently so turning doesn't carve
+    const give = P.give * (grab.on ? 0.35 : 1);
+    const P0 = new THREE.Vector3();
     let minD2 = Infinity, cnt = 0, jx = 0, jy = 0, jz = 0, cx = 0, cy = 0, cz = 0, ux = 0, uy = 0, uz = 0;
     for (let s = 1; s <= n; s++) {
+      P0.lerpVectors(prev, tip, (s - 1) / n);
       B.lerpVectors(prev, tip, s / n);
+      const pbx = P0.x - ax, pby = P0.y - ay, pbz = P0.z - az, pbb = pbx*pbx + pby*pby + pbz*pbz;
       // the finger is a capsule from the viewer to the fingertip, so it can also press on the clay's sides
       const abx = B.x - ax, aby = B.y - ay, abz = B.z - az, abb = abx*abx + aby*aby + abz*abz;
       let tc = -(ax*abx + ay*aby + az*abz) / abb; tc = tc < 0 ? 0 : tc > 1 ? 1 : tc;
@@ -321,14 +324,21 @@ function sculpt(fingers, dt) {
         if (d2 >= r2) continue;
         let d = Math.sqrt(d2);
         if (d < 1e-5) { dx = -nrm[i3]; dy = -nrm[i3+1]; dz = -nrm[i3+2]; d = 1e-5; }
-        // soft round pad: the middle of the fingertip sinks in fastest, the edge barely moves
-        const fall = 1 - d / r, want = r - d;
-        const mv = Math.min(want, step * (0.15 + 1.85 * fall * fall)), k = mv / d;
+        // how much further in the finger came since its last position: only that new push moves clay
+        let tp = ((px-ax)*pbx + (py-ay)*pby + (pz-az)*pbz) / pbb; tp = tp < 0 ? 0 : tp > 1 ? 1 : tp;
+        const ex = px - (ax + pbx*tp), ey = py - (ay + pby*tp), ez = pz - (az + pbz*tp);
+        const dPrev = Math.sqrt(ex*ex + ey*ey + ez*ez);
+        const inc = (r - d) - Math.max(0, r - dPrev);
+        touched[i] = 1;
+        cx += px; cy += py; cz += pz; cnt++;
+        if (inc <= 0) continue;
+        heat[i] = 1;
+        // soft round pad: the middle of the fingertip pushes fully, toward the edge it fades out
+        const fall = 1 - d / r, k = inc * give * (0.25 + 0.75 * fall) / d;
         pos[i3] = px + dx*k; pos[i3+1] = py + dy*k; pos[i3+2] = pz + dz*k;
         disp[i3] += dx*k; disp[i3+1] += dy*k; disp[i3+2] += dz*k; ux += dx*k; uy += dy*k; uz += dz*k;
-        const kw = want / d;   // the full overlap: what a free-floating lump would be shoved by
-        jx += dx*kw; jy += dy*kw; jz += dz*kw; cx += px; cy += py; cz += pz; cnt++;
-        touched[i] = 1; heat[i] = 1;
+        const kw = inc / d;   // the finger's new push: what a free-floating lump would be shoved by
+        jx += dx*kw; jy += dy*kw; jz += dz*kw;
       }
     }
     st.prevW.copy(tipW);
@@ -382,8 +392,9 @@ function sculpt(fingers, dt) {
   }
 
   // handled clay slowly loses its corners and rounds off as a whole
-  if (contacts.length && P.rounding > 0) {
-    const a = P.rounding * Math.min(3, contacts.length);
+  let pushAmt = 0; for (const c of contacts) pushAmt += c.m.length();
+  if (pushAmt > 0 && P.rounding > 0) {
+    const a = P.rounding * Math.min(3, pushAmt / 0.01);   // by how much was pressed this frame, not by time
     for (let i = 0; i < N; i++) {
       if (touched[i]) continue;
       let sx = 0, sy = 0, sz = 0; const s0 = nbStart[i], s1 = nbStart[i+1];
