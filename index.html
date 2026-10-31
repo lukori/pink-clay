@@ -52,36 +52,42 @@ import * as THREE from 'three';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
-// ---------- tunable parameters (URL overrides: ?tipR=0.15&resist=0.7, ?debug for the overlay) ----------
+// ---------- tunable parameters (URL overrides: ?tipR=0.15&pressSpeed=0.5, ?debug for the overlay) ----------
 const DEFAULT_PARAMS = {
   sFar: 0.11,       // palm size (share of camera height) where fingers float in front of the clay
   sNear: 0.20,      // palm size where fingers reach the full push depth
   pushRange: 2.4,   // how deep the hand travels between sFar and sNear
   fingerDepth: 3.0, // extra depth from each fingertip leaning toward the camera
   zStart: 1.4,      // depth of a far hand (the block's front is around 0.6)
-  tipR: 0.13,       // fingertip size
-  resist: 0.5,      // 0 = clay gives way instantly, 0.95 = very stiff
+  tipR: 0.13,       // fingertip size (the soft press area is 1.8x this)
+  pressSpeed: 0.35, // how fast clay gives way under a finger, per second: time makes the dent
+  steady: 0.35,     // hand tracking smoothing (lower = steadier but slower to follow)
+  grabTurn: 1.0,    // two hands touching: how much turning the hands turns the clay
+  grabMove: 0.8,    // two hands touching: how much moving the hands moves the clay
+  squeeze: 0.8,     // two hands touching: hands closer = clay squeezed thinner and wider
   soft: 0.55,       // how much the clay around a fingertip goes along with it (deeper, softer dents)
   spread: 0.32,     // how wide that soft area is
   rounding: 0.012,  // while touched, the whole lump slowly rounds off (per touching finger)
-  volKeep: 0.5,     // how fast pushed clay comes back out as a bulge
-  bulge: 0.5,       // how far around the finger the bulge spreads
+  volKeep: 0.35,    // how fast pushed-in clay comes back out somewhere (keeps the amount of clay)
+  bulge: 1.0,       // how far around the finger the returning clay is focused
+  overall: 0.7,     // share of returning clay that goes into the whole lump's shape instead of a rim by the finger
   smooth: 0.2,      // smoothing where fingers rub
   mobility: 0.8,    // a one-sided push moves the lump instead of only denting it
   turn: 1.0,        // how easily off-centre pushes turn the lump
   drag: 2.5,        // how fast the lump stops drifting / spinning after you let go
   home: 0.8,        // pull back toward the middle of the screen
-  cavity: 0.05,     // darkening inside dents and folds
+  cavity: 0.2,      // darkening inside dents and folds
   grain: 0.003,     // fine surface grain
   wheel: 0.6,       // potter's wheel speed when ◎ Wheel is on
-  mouseRate: 1.5,   // how fast a held mouse/touch presses in
+  mouseRate: 2.9,   // how fast a held mouse/touch presses in
 };
 const LIMITS = {
   sFar: [0.03, 0.4, 0.01], sNear: [0.05, 0.6, 0.01], pushRange: [0.5, 5, 0.1], fingerDepth: [0, 8, 0.25],
-  zStart: [0.8, 3, 0.1], tipR: [0.05, 0.4, 0.01], resist: [0, 0.95, 0.05], soft: [0, 1, 0.05],
-  spread: [0.1, 0.8, 0.02], rounding: [0, 0.06, 0.002], volKeep: [0, 1, 0.05], bulge: [0.15, 1.5, 0.05],
+  zStart: [0.8, 3, 0.1], tipR: [0.05, 0.4, 0.01], pressSpeed: [0.05, 3, 0.05], steady: [0.05, 1, 0.05],
+  grabTurn: [0, 2, 0.1], grabMove: [0, 2, 0.1], squeeze: [0, 2, 0.1], soft: [0, 1, 0.05],
+  spread: [0.1, 0.8, 0.02], rounding: [0, 0.06, 0.002], volKeep: [0, 1, 0.05], bulge: [0.15, 1.5, 0.05], overall: [0, 1, 0.05],
   smooth: [0, 1, 0.05], mobility: [0, 1, 0.05], turn: [0, 2, 0.05], drag: [0.2, 10, 0.1], home: [0, 4, 0.1],
-  cavity: [0, 0.2, 0.01], grain: [0, 0.03, 0.001], wheel: [0, 3, 0.1], mouseRate: [0.3, 5, 0.1],
+  cavity: [0, 0.5, 0.01], grain: [0, 0.03, 0.001], wheel: [0, 3, 0.1], mouseRate: [0.3, 5, 0.1],
 };
 const qs = new URLSearchParams(location.search);
 const DEBUG = qs.has('debug');
@@ -284,7 +290,7 @@ function sculpt(fingers, dt) {
   touched.fill(0); disp.fill(0);
   let maxR2 = 0;
   for (let i = 0; i < 3*N; i += 3) { const d = pos[i]*pos[i] + pos[i+1]*pos[i+1] + pos[i+2]*pos[i+2]; if (d > maxR2) maxR2 = d; }
-  const maxR = Math.sqrt(maxR2), r = P.tipR, r2 = r * r, give = 1 - P.resist;
+  const maxR = Math.sqrt(maxR2), r = P.tipR * 1.8, r2 = r * r;
   const contacts = [];
   const ax = camLocal.x, ay = camLocal.y, az = camLocal.z;
   const tipW = new THREE.Vector3(), tip = new THREE.Vector3(), prev = new THREE.Vector3(), B = new THREE.Vector3();
@@ -295,8 +301,10 @@ function sculpt(fingers, dt) {
     tip.copy(tipW).applyMatrix4(inv);
     if (!st.prevW) st.prevW = rayPoint(f.sx, f.sy, P.zStart + 0.4, new THREE.Vector3());
     prev.copy(st.prevW).applyMatrix4(inv);
-    const n = Math.min(10, Math.max(1, Math.ceil(prev.distanceTo(tip) / (r * 0.5))));
-    let minD2 = Infinity, cnt = 0, jx = 0, jy = 0, jz = 0, cx = 0, cy = 0, cz = 0;
+    const n = Math.min(10, Math.max(1, Math.ceil(prev.distanceTo(tip) / (r * 0.4))));
+    // clay gives way over time, not all at once; holding with both hands presses gently so turning doesn't carve
+    const step = P.pressSpeed * (grab.on ? 0.35 : 1) * dt / n;
+    let minD2 = Infinity, cnt = 0, jx = 0, jy = 0, jz = 0, cx = 0, cy = 0, cz = 0, ux = 0, uy = 0, uz = 0;
     for (let s = 1; s <= n; s++) {
       B.lerpVectors(prev, tip, s / n);
       // the finger is a capsule from the viewer to the fingertip, so it can also press on the clay's sides
@@ -313,24 +321,28 @@ function sculpt(fingers, dt) {
         if (d2 >= r2) continue;
         let d = Math.sqrt(d2);
         if (d < 1e-5) { dx = -nrm[i3]; dy = -nrm[i3+1]; dz = -nrm[i3+2]; d = 1e-5; }
-        const k = (r / d - 1) * give, mx = dx*k, my = dy*k, mz = dz*k;
-        pos[i3] = px + mx; pos[i3+1] = py + my; pos[i3+2] = pz + mz;
-        disp[i3] += mx; disp[i3+1] += my; disp[i3+2] += mz;
-        jx += mx; jy += my; jz += mz; cx += px; cy += py; cz += pz; cnt++;
+        // soft round pad: the middle of the fingertip sinks in fastest, the edge barely moves
+        const fall = 1 - d / r, want = r - d;
+        const mv = Math.min(want, step * (0.15 + 1.85 * fall * fall)), k = mv / d;
+        pos[i3] = px + dx*k; pos[i3+1] = py + dy*k; pos[i3+2] = pz + dz*k;
+        disp[i3] += dx*k; disp[i3+1] += dy*k; disp[i3+2] += dz*k; ux += dx*k; uy += dy*k; uz += dz*k;
+        const kw = want / d;   // the full overlap: what a free-floating lump would be shoved by
+        jx += dx*kw; jy += dy*kw; jz += dz*kw; cx += px; cy += py; cz += pz; cnt++;
         touched[i] = 1; heat[i] = 1;
       }
     }
     st.prevW.copy(tipW);
     const md = Math.sqrt(minD2);
-    st.touch = md < r * (st.touch ? 1.3 : 1.08);
-    st.prox = Math.max(0, Math.min(1, 1 - (md - r) / 0.7));
-    if (cnt) contacts.push({ c: new THREE.Vector3(cx/cnt, cy/cnt, cz/cnt), j: new THREE.Vector3(jx/cnt, jy/cnt, jz/cnt), tip: tip.clone() });
+    st.touch = md < r * (st.touch ? 1.0 : 0.8);
+    st.prox = Math.max(0, Math.min(1, 1 - (md - r * 0.8) / 0.7));
+    if (cnt) contacts.push({ c: new THREE.Vector3(cx/cnt, cy/cnt, cz/cnt), j: new THREE.Vector3(jx/cnt, jy/cnt, jz/cnt),
+      m: new THREE.Vector3(ux/cnt, uy/cnt, uz/cnt), tip: tip.clone() });
   }
   contactCount = contacts.length;
 
-  // split the push: one-sided pushes move/turn the lump, opposing pushes (a squeeze) only shape it
+  // split the push: one-sided pushes move/turn the lump, opposing pushes (a squeeze) only shape it.
+  // While both hands hold it, the hands move it instead (see updateGrab).
   const t = new THREE.Vector3(), th = new THREE.Vector3();
-  let mob = 0;
   if (contacts.length) {
     let absSum = 0;
     for (const c of contacts) {
@@ -338,15 +350,14 @@ function sculpt(fingers, dt) {
       th.add(new THREE.Vector3().crossVectors(c.c, c.j).divideScalar(c.c.lengthSq() + 0.15));
     }
     lastShare = absSum > 0 ? t.length() / absSum : 0;
-    mob = P.mobility * lastShare;
+    const mob = grab.on ? 0 : P.mobility * lastShare * 0.5;
     t.multiplyScalar(mob);
-    th.multiplyScalar(P.turn * P.mobility);
-    // what moved the body is not also a dent; the rest spreads softly into the clay around the finger
-    for (let i3 = 0; i3 < 3*N; i3 += 3) { pos[i3] -= disp[i3]*mob; pos[i3+1] -= disp[i3+1]*mob; pos[i3+2] -= disp[i3+2]*mob; }
+    th.multiplyScalar(grab.on ? 0 : P.turn * P.mobility * 0.5);
+    // the dent spreads softly into the clay around the finger
     if (P.soft > 0) {
       const s2 = P.spread * P.spread;
       for (const c of contacts) {
-        const kx = c.j.x * (1 - mob) * P.soft, ky = c.j.y * (1 - mob) * P.soft, kz = c.j.z * (1 - mob) * P.soft;
+        const kx = c.m.x * P.soft, ky = c.m.y * P.soft, kz = c.m.z * P.soft;
         for (let i = 0, i3 = 0; i < N; i++, i3 += 3) {
           if (touched[i]) continue;
           const dx = pos[i3]-c.c.x, dy = pos[i3+1]-c.c.y, dz = pos[i3+2]-c.c.z, d2 = dx*dx + dy*dy + dz*dz;
@@ -358,7 +369,7 @@ function sculpt(fingers, dt) {
       }
     }
   }
-  moveBody(t, th, dt, contacts.length > 0);
+  moveBody(t, th, dt, contacts.length > 0 && !grab.on);
 
   // rubbed areas smooth out a little
   if (P.smooth > 0) for (let i = 0; i < N; i++) {
@@ -392,7 +403,7 @@ function sculpt(fingers, dt) {
       if (!touched[i]) {
         if (contacts.length === 0) w = 1;
         else {
-          w = 0.12;
+          w = P.overall;
           for (const c of contacts) {
             const dx = pos[i3]-c.c.x, dy = pos[i3+1]-c.c.y, dz = pos[i3+2]-c.c.z;
             w += Math.exp(-(dx*dx + dy*dy + dz*dz) / b2);
@@ -450,6 +461,54 @@ function moveBody(tLocal, thLocal, dt, touching) {
   }
   if (wheelOn) rotateWorld(wTmp.set(0, P.wheel * dt, 0));
   if (clay.position.length() > 1.6) clay.position.setLength(1.6);
+}
+
+// ---------- both hands on the clay: hold it, turn it, move it, squeeze or stretch the whole shape ----------
+const grab = { on: false, axis: null, mid: null, len: 0, sm: {} };
+function updateGrab(fingers, dt) {
+  const groups = {};
+  for (const f of fingers) if (f.hand) (groups[f.hand] = groups[f.hand] || []).push(f);
+  const keys = Object.keys(groups).sort();
+  const need = grab.on ? 1 : 2;   // grab with two fingers of each hand, keep holding with one
+  const holding = keys.length >= 2 && keys.slice(0, 2).every(k => groups[k].filter(f => f.st.touch).length >= need);
+  if (!holding) { grab.on = false; grab.axis = null; grab.sm = {}; return; }
+  const cs = keys.slice(0, 2).map(k => {
+    const c = new THREE.Vector3(), p = new THREE.Vector3();
+    for (const f of groups[k]) c.add(rayPoint(f.sx, f.sy, f.st.z, p));
+    c.divideScalar(groups[k].length);
+    const a = 1 - Math.pow(1 - P.steady, dt * 60);
+    grab.sm[k] = grab.sm[k] ? grab.sm[k].lerp(c, a) : c;
+    return grab.sm[k];
+  });
+  const axis = cs[1].clone().sub(cs[0]), len = axis.length(), mid = cs[0].clone().add(cs[1]).multiplyScalar(0.5);
+  if (len < 1e-3) return;
+  axis.divideScalar(len);
+  if (grab.axis) {
+    // turn: follow the line between the hands
+    const q = new THREE.Quaternion().setFromUnitVectors(grab.axis, axis);
+    if (P.grabTurn !== 1) q.slerp(new THREE.Quaternion(), 1 - Math.min(1, P.grabTurn));
+    clay.quaternion.premultiply(q).normalize();
+    const moved = mid.clone().sub(grab.mid).multiplyScalar(P.grabMove);
+    clay.position.add(moved);
+    // remember the motion so the clay drifts on a little when you let go
+    const sdt = Math.max(dt, 1 / 120), sgn = q.w < 0 ? -1 : 1, ang = 2 * Math.acos(Math.min(1, Math.abs(q.w)));
+    const spin = new THREE.Vector3(q.x, q.y, q.z).multiplyScalar(sgn);
+    if (spin.lengthSq() > 1e-12) spin.setLength(ang / sdt);
+    body.vel.lerp(moved.divideScalar(sdt), 0.3);
+    body.ang.lerp(spin, 0.3);
+    // squeeze / stretch: along the hands' line by the change in their distance, the other way to keep the volume
+    let ratio = Math.pow(len / grab.len, P.squeeze);
+    ratio = Math.max(0.985, Math.min(1.015, ratio));
+    if (Math.abs(ratio - 1) > 1e-4) {
+      const a = axis.clone().applyQuaternion(clay.quaternion.clone().invert()), perp = 1 / Math.sqrt(ratio);
+      for (let i3 = 0; i3 < 3*N; i3 += 3) {
+        const al = pos[i3]*a.x + pos[i3+1]*a.y + pos[i3+2]*a.z;
+        const px = pos[i3] - a.x*al, py = pos[i3+1] - a.y*al, pz = pos[i3+2] - a.z*al;
+        pos[i3] = a.x*al*ratio + px*perp; pos[i3+1] = a.y*al*ratio + py*perp; pos[i3+2] = a.z*al*ratio + pz*perp;
+      }
+    }
+  }
+  grab.on = true; grab.axis = axis; grab.mid = mid; grab.len = len;
 }
 
 // ---------- hand tracking ----------
@@ -531,16 +590,19 @@ function gatherFingers(dt) {
     const label = labels[h];
     const d = (a, b) => Math.hypot((lm[a].x - lm[b].x) * vw / vh, lm[a].y - lm[b].y);
     const raw = Math.max(d(0, 9), d(5, 17) * 1.6);
-    palm[label] = palm[label] == null ? raw : palm[label] + (raw - palm[label]) * 0.35;
+    const a = 1 - Math.pow(1 - P.steady, dt * 60);   // smoothing that doesn't depend on frame rate
+    palm[label] = palm[label] == null ? raw : palm[label] + (raw - palm[label]) * a * 0.6;
     const s = palm[label];
     const push = Math.max(0, Math.min(1, (s - P.sFar) / (P.sNear - P.sFar))) * P.pushRange;
     const info = { label, s, push, pts: lm.map(toScreen), fingers: [] };
     TIPS.forEach((ti, fi) => {
       const st = getState(label + fi);
       const zt = Math.max(-1.8, P.zStart - push + lm[ti].z * P.fingerDepth);
-      st.z += (zt - st.z) * 0.5;
       const [sx, sy] = info.pts[ti];
-      fingers.push({ sx, sy, st });
+      if (st.sx == null) { st.sx = sx; st.sy = sy; }
+      st.z += (zt - st.z) * a * 0.6;
+      st.sx += (sx - st.sx) * a; st.sy += (sy - st.sy) * a;
+      fingers.push({ sx: st.sx, sy: st.sy, st, hand: label });
       info.fingers.push(st);
     });
     handInfo.push(info);
@@ -552,7 +614,7 @@ function gatherFingers(dt) {
   }
   for (const f of (window.__fakeFingers || [])) {   // test hook: [{key, sx, sy, z}]
     const st = getState('fake' + f.key); st.z = f.z;
-    fingers.push({ sx: f.sx, sy: f.sy, st, mouse: true });
+    fingers.push({ sx: f.sx, sy: f.sy, st, mouse: true, hand: f.hand });
   }
   for (const [k, st] of fingerState) if (!st.seen) fingerState.delete(k);
   return fingers;
@@ -577,7 +639,7 @@ function drawSkeleton(fingers) {
   sk.lineCap = 'round'; sk.lineJoin = 'round';
   for (const info of handInfo) {
     const p = info.pts;
-    sk.strokeStyle = 'rgba(255,255,255,.45)'; sk.lineWidth = 3;
+    sk.strokeStyle = grab.on ? 'rgba(40,235,110,.9)' : 'rgba(255,255,255,.45)'; sk.lineWidth = grab.on ? 5 : 3;
     sk.beginPath(); for (const [a, b] of PALM) { sk.moveTo(...p[a]); sk.lineTo(...p[b]); } sk.stroke();
     CHAINS.forEach((ch, fi) => {
       const st = info.fingers[fi];
@@ -629,13 +691,13 @@ function sampleLog(t) {
   const fmt = st => `z=${st.z.toFixed(2)}${st.touch ? '*' : ''}`;
   const p = clay.position;
   let s = `t=${t.toFixed(2)} fps=${fps.toFixed(0)} det=${detMs.toFixed(1)}ms vol=${volRatio.toFixed(3)} hands=${handInfo.length}` +
-    ` contacts=${contactCount} share=${lastShare.toFixed(2)} pos=${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)} spin=${body.ang.length().toFixed(2)}`;
+    ` contacts=${contactCount} share=${lastShare.toFixed(2)} pos=${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)} spin=${body.ang.length().toFixed(2)} grab=${grab.on ? 1 : 0}`;
   for (const h of handInfo) s += `\n  ${h.label} palm=${h.s.toFixed(3)} push=${h.push.toFixed(2)} | ${h.fingers.map(fmt).join(' ')}`;
   const m = fingerState.get('mouse'); if (m) s += `\n  mouse ${fmt(m)}`;
   logLines.push(s); if (logLines.length > 2400) logLines.shift();
   if (DEBUG) document.getElementById('stats').textContent =
     `fps ${fps.toFixed(0)}  detect ${detMs.toFixed(1)}ms\nverts ${N}  clay volume ${(volRatio * 100).toFixed(1)}%\n` +
-    `contacts ${contactCount}  one-sided ${lastShare.toFixed(2)}\n` +
+    `contacts ${contactCount}  one-sided ${lastShare.toFixed(2)}  ${grab.on ? 'HOLDING' : ''}\n` +
     handInfo.map(h => `${h.label} palm ${h.s.toFixed(3)} push ${h.push.toFixed(2)}\n ${h.fingers.map(st => (st.touch ? '●' : '○') + st.z.toFixed(2)).join(' ')}`).join('\n');
 }
 
@@ -649,6 +711,10 @@ function frame(now) {
   inv.copy(clay.matrixWorld).invert();
   camLocal.copy(camera.position).applyMatrix4(inv);
   const fingers = gatherFingers(dt);
+  updateGrab(fingers, dt);
+  clay.updateMatrixWorld();
+  inv.copy(clay.matrixWorld).invert();
+  camLocal.copy(camera.position).applyMatrix4(inv);
   sculpt(fingers, dt);
   drawSkeleton(fingers);
   renderer.render(scene, camera);
