@@ -1,0 +1,662 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Pink Clay</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; touch-action: none;
+    color: #fff; font: 600 15px system-ui, sans-serif; -webkit-user-select: none; user-select: none; }
+  #gl, #skel { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #skel { pointer-events: none; z-index: 1; }
+  #ui { position: fixed; z-index: 3; top: calc(env(safe-area-inset-top) + 12px); left: calc(env(safe-area-inset-left) + 12px);
+    display: flex; gap: 8px; flex-wrap: wrap; }
+  button { background: rgba(255,255,255,.14); color: #fff; border: 0; border-radius: 999px;
+    padding: 9px 15px; font: inherit; cursor: pointer; }
+  button:hover { background: rgba(255,255,255,.24); }
+  button.on { background: rgba(247,161,196,.5); }
+  #hint { position: fixed; z-index: 2; left: 16px; right: 16px; bottom: calc(env(safe-area-inset-bottom) + 16px);
+    text-align: center; color: rgba(255,255,255,.6); pointer-events: none; transition: opacity 1.2s; line-height: 1.4; }
+  #video { position: fixed; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+  /* not "dbg": an element id becomes a global, and MediaPipe calls a global dbg() */
+  #debugPanel { display: none; position: fixed; z-index: 4; right: calc(env(safe-area-inset-right) + 12px);
+    top: calc(env(safe-area-inset-top) + 60px); max-height: calc(100% - 140px); overflow: auto;
+    background: rgba(20,20,20,.82); border-radius: 10px; padding: 8px 10px; font: 12px ui-monospace, Menlo, monospace; }
+  #debugPanel .row { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
+  #debugPanel .row span { flex: 1; white-space: nowrap; }
+  #debugPanel button { padding: 3px 10px; font: 13px ui-monospace, monospace; }
+  #stats { white-space: pre; margin-bottom: 6px; color: #9f9; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<canvas id="skel"></canvas>
+<video id="video" playsinline muted></video>
+<div id="ui">
+  <button id="cam">✋ Start camera</button>
+  <button id="reset">↺ New clay</button>
+  <button id="wheel">◎ Wheel</button>
+</div>
+<div id="debugPanel"><div id="stats"></div><div id="params"></div>
+  <div class="row"><button id="saveLog">Save log</button><button id="copyLog">Copy log</button></div></div>
+<div id="hint">Start the camera and hold your hand up.<br>Bring your hand closer to the camera to press into the clay. Push it to move and turn it, squeeze it from both sides.</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+// ---------- tunable parameters (URL overrides: ?tipR=0.15&resist=0.7, ?debug for the overlay) ----------
+const DEFAULT_PARAMS = {
+  sFar: 0.11,       // palm size (share of camera height) where fingers float in front of the clay
+  sNear: 0.20,      // palm size where fingers reach the full push depth
+  pushRange: 2.4,   // how deep the hand travels between sFar and sNear
+  fingerDepth: 3.0, // extra depth from each fingertip leaning toward the camera
+  zStart: 1.4,      // depth of a far hand (the block's front is around 0.6)
+  tipR: 0.13,       // fingertip size
+  resist: 0.5,      // 0 = clay gives way instantly, 0.95 = very stiff
+  soft: 0.55,       // how much the clay around a fingertip goes along with it (deeper, softer dents)
+  spread: 0.32,     // how wide that soft area is
+  rounding: 0.012,  // while touched, the whole lump slowly rounds off (per touching finger)
+  volKeep: 0.5,     // how fast pushed clay comes back out as a bulge
+  bulge: 0.5,       // how far around the finger the bulge spreads
+  smooth: 0.2,      // smoothing where fingers rub
+  mobility: 0.8,    // a one-sided push moves the lump instead of only denting it
+  turn: 1.0,        // how easily off-centre pushes turn the lump
+  drag: 2.5,        // how fast the lump stops drifting / spinning after you let go
+  home: 0.8,        // pull back toward the middle of the screen
+  cavity: 0.05,     // darkening inside dents and folds
+  grain: 0.003,     // fine surface grain
+  wheel: 0.6,       // potter's wheel speed when ◎ Wheel is on
+  mouseRate: 1.5,   // how fast a held mouse/touch presses in
+};
+const LIMITS = {
+  sFar: [0.03, 0.4, 0.01], sNear: [0.05, 0.6, 0.01], pushRange: [0.5, 5, 0.1], fingerDepth: [0, 8, 0.25],
+  zStart: [0.8, 3, 0.1], tipR: [0.05, 0.4, 0.01], resist: [0, 0.95, 0.05], soft: [0, 1, 0.05],
+  spread: [0.1, 0.8, 0.02], rounding: [0, 0.06, 0.002], volKeep: [0, 1, 0.05], bulge: [0.15, 1.5, 0.05],
+  smooth: [0, 1, 0.05], mobility: [0, 1, 0.05], turn: [0, 2, 0.05], drag: [0.2, 10, 0.1], home: [0, 4, 0.1],
+  cavity: [0, 0.2, 0.01], grain: [0, 0.03, 0.001], wheel: [0, 3, 0.1], mouseRate: [0.3, 5, 0.1],
+};
+const qs = new URLSearchParams(location.search);
+const DEBUG = qs.has('debug');
+const P = { ...DEFAULT_PARAMS };
+const clampP = (k, v) => Math.min(LIMITS[k][1], Math.max(LIMITS[k][0], v));
+for (const k in P) if (qs.has(k)) { const v = parseFloat(qs.get(k)); if (isFinite(v)) P[k] = clampP(k, v); }
+
+// ---------- scene ----------
+const glCanvas = document.getElementById('gl'), skel = document.getElementById('skel'), sk = skel.getContext('2d');
+const video = document.getElementById('video'), hint = document.getElementById('hint');
+const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 100);
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x2a0c18, 0.35));
+const key = new THREE.DirectionalLight(0xffffff, 2.6); key.position.set(-2.5, 3.5, 4);
+key.castShadow = true; key.shadow.mapSize.set(2048, 2048); key.shadow.normalBias = 0.025; key.shadow.radius = 4;
+Object.assign(key.shadow.camera, { left: -2.5, right: 2.5, top: 2.5, bottom: -2.5, near: 0.5, far: 15 });
+scene.add(key);
+const rim = new THREE.DirectionalLight(0xffa8d0, 1.6); rim.position.set(3.5, 1.5, -3); scene.add(rim);
+const fill = new THREE.DirectionalLight(0xffe6f0, 0.45); fill.position.set(3, -2, 3); scene.add(fill);
+
+let W = 1, H = 1, dpr = 1;
+function resize() {
+  W = innerWidth; H = innerHeight; dpr = Math.min(devicePixelRatio, 2);
+  renderer.setSize(W, H, false);
+  camera.aspect = W / H;
+  const half = Math.tan(THREE.MathUtils.degToRad(15));
+  camera.position.set(0, 0, 1.8 / (half * Math.min(1, camera.aspect)));
+  camera.lookAt(0, 0, 0);
+  camera.updateProjectionMatrix();
+  skel.width = W * dpr; skel.height = H * dpr;
+  sk.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+addEventListener('resize', resize); resize();
+
+// ---------- clay mesh: a block of clay (rounded box), subdivided evenly ----------
+const HX = 0.62, HY = 0.82, HZ = 0.52;   // half sizes: a tall block, like clay out of the pack
+let geo = new THREE.BoxGeometry(1, 1, 1, 46, 60, 38);
+geo.deleteAttribute('normal'); geo.deleteAttribute('uv');
+geo = mergeVertices(geo, 1e-4);
+const N = geo.attributes.position.count;
+const pos = geo.attributes.position.array, idx = geo.index.array;
+const cube = pos.slice();           // the unit-cube layout, kept to rebuild a fresh block
+const restAttr = new Float32Array(N * 3);
+geo.setAttribute('aRest', new THREE.BufferAttribute(restAttr, 3));
+const colors = new Float32Array(N * 3).fill(1);
+geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+// neighbour lists for smoothing and curvature
+const nbSets = Array.from({ length: N }, () => new Set());
+for (let t = 0; t < idx.length; t += 3) {
+  const a = idx[t], b = idx[t+1], c = idx[t+2];
+  nbSets[a].add(b); nbSets[a].add(c); nbSets[b].add(a); nbSets[b].add(c); nbSets[c].add(a); nbSets[c].add(b);
+}
+const nbStart = new Uint32Array(N + 1); let nbTotal = 0;
+for (let i = 0; i < N; i++) { nbStart[i] = nbTotal; nbTotal += nbSets[i].size; } nbStart[N] = nbTotal;
+const nbList = new Uint32Array(nbTotal);
+for (let i = 0, o = 0; i < N; i++) for (const j of nbSets[i]) nbList[o++] = j;
+
+const heat = new Float32Array(N), touched = new Uint8Array(N), wts = new Float32Array(N);
+const disp = new Float32Array(N * 3), ao = new Float32Array(N);
+let nrm = null, area = 0, V0 = 1, volRatio = 1;
+
+function measure() {   // returns volume, also updates surface area
+  let v = 0, a = 0;
+  for (let t = 0; t < idx.length; t += 3) {
+    const i = 3*idx[t], j = 3*idx[t+1], k = 3*idx[t+2];
+    const ax = pos[i], ay = pos[i+1], az = pos[i+2], bx = pos[j], by = pos[j+1], bz = pos[j+2], cx = pos[k], cy = pos[k+1], cz = pos[k+2];
+    v += ax * (by*cz - bz*cy) + ay * (bz*cx - bx*cz) + az * (bx*cy - by*cx);
+    const ux = bx-ax, uy = by-ay, uz = bz-az, wx = cx-ax, wy = cy-ay, wz = cz-az;
+    const qx = uy*wz - uz*wy, qy = uz*wx - ux*wz, qz = ux*wy - uy*wx;
+    a += Math.sqrt(qx*qx + qy*qy + qz*qz);
+  }
+  area = a / 2;
+  return v / 6;
+}
+
+// a fresh, slightly handled block: rounded edges, a little lean and taper, lumps and a few old thumb marks
+function newClay() {
+  const R = Math.random, rc = 0.2 + R() * 0.06;
+  const taper = (R() - 0.5) * 0.12, leanX = (R() - 0.5) * 0.12, leanZ = (R() - 0.5) * 0.08;
+  const waves = Array.from({ length: 6 }, () => ({ f: [R()*5+1.5, R()*5+1.5, R()*5+1.5], p: R()*6.3, a: 0.006 + R()*0.01 }));
+  const dirs = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    const i3 = 3*i, qx = cube[i3]*2*HX, qy = cube[i3+1]*2*HY, qz = cube[i3+2]*2*HZ;
+    const cx = Math.max(-(HX-rc), Math.min(HX-rc, qx)), cy = Math.max(-(HY-rc), Math.min(HY-rc, qy)), cz = Math.max(-(HZ-rc), Math.min(HZ-rc, qz));
+    let dx = qx-cx, dy = qy-cy, dz = qz-cz; const dl = Math.hypot(dx, dy, dz) || 1; dx /= dl; dy /= dl; dz /= dl;
+    let x = cx + dx*rc, y = cy + dy*rc, z = cz + dz*rc;
+    let lump = 0; for (const w of waves) lump += w.a * Math.sin(w.f[0]*x + w.f[1]*y + w.f[2]*z + w.p);
+    x += dx*lump; y += dy*lump; z += dz*lump;
+    const s = 1 + taper * (y / HY);
+    x = x * s + leanX * y; z = z * s + leanZ * y;
+    pos[i3] = x; pos[i3+1] = y; pos[i3+2] = z;
+    dirs[i3] = dx; dirs[i3+1] = dy; dirs[i3+2] = dz;
+  }
+  const marks = 3 + Math.floor(R() * 4);   // soft thumb dents from earlier handling
+  for (let m = 0; m < marks; m++) {
+    const c = Math.floor(R() * N) * 3, cx = pos[c], cy = pos[c+1], cz = pos[c+2];
+    const rad = 0.1 + R() * 0.14, depth = 0.025 + R() * 0.05, r2 = rad * rad;
+    const ex = 1 + R() * 0.8;   // a little elongated, like a smear
+    for (let i3 = 0; i3 < 3*N; i3 += 3) {
+      const ddx = (pos[i3]-cx) / ex, ddy = pos[i3+1]-cy, ddz = pos[i3+2]-cz;
+      const d2 = ddx*ddx + ddy*ddy + ddz*ddz; if (d2 > 4 * r2) continue;
+      const g = Math.exp(-d2 / r2) * depth - Math.exp(-d2 / (2.2 * r2)) * depth * 0.35;
+      pos[i3] -= dirs[i3]*g; pos[i3+1] -= dirs[i3+1]*g; pos[i3+2] -= dirs[i3+2]*g;
+    }
+  }
+  restAttr.set(pos); geo.attributes.aRest.needsUpdate = true;
+  heat.fill(0);
+  V0 = measure(); volRatio = 1;
+  geo.attributes.position.needsUpdate = true; geo.computeVertexNormals(); nrm = geo.attributes.normal.array;
+  updateCavity();
+  if (window.clay) {
+    clay.position.set(0, 0, 0); body.vel.set(0, 0, 0); body.ang.set(0, 0, 0);
+    clay.quaternion.setFromEuler(new THREE.Euler(0.18 + (R()-0.5)*0.1, -0.55 + (R()-0.5)*0.3, (R()-0.5)*0.08));
+  }
+}
+
+// darker inside dents and folds (curvature from the neighbour average), like light not reaching in
+function updateCavity() {
+  for (let i = 0, i3 = 0; i < N; i++, i3 += 3) {
+    let sx = 0, sy = 0, sz = 0, h2 = 0; const s0 = nbStart[i], s1 = nbStart[i+1];
+    for (let q = s0; q < s1; q++) {
+      const j = 3*nbList[q], dx = pos[j]-pos[i3], dy = pos[j+1]-pos[i3+1], dz = pos[j+2]-pos[i3+2];
+      sx += dx; sy += dy; sz += dz; h2 += dx*dx + dy*dy + dz*dz;
+    }
+    const m = 1 / (s1 - s0);
+    const k = -2 * (sx*nrm[i3] + sy*nrm[i3+1] + sz*nrm[i3+2]) * m / (h2 * m + 1e-9);   // + convex, - concave
+    ao[i] = Math.max(0, Math.min(0.55, -k * P.cavity));
+  }
+  for (let i = 0; i < N; i++) {
+    let s = ao[i] * 2, c = 2; const s0 = nbStart[i], s1 = nbStart[i+1];
+    for (let q = s0; q < s1; q++) { s += ao[nbList[q]]; c++; }
+    const v = 1 - s / c; colors[3*i] = v; colors[3*i+1] = v; colors[3*i+2] = v;
+  }
+  geo.attributes.color.needsUpdate = true;
+}
+
+const mat = new THREE.MeshPhysicalMaterial({ color: new THREE.Color('#f58cb8'), roughness: 0.66, metalness: 0,
+  vertexColors: true, sheen: 0.45, sheenColor: new THREE.Color('#ffd3e4'), sheenRoughness: 0.55,
+  clearcoat: 0.08, clearcoatRoughness: 0.5, envMapIntensity: 0.35 });
+const grainU = { value: P.grain };
+mat.onBeforeCompile = (sh) => {   // mottled colour, varied shine and fine grain that stick to the clay as it moves
+  sh.uniforms.uGrain = grainU;
+  sh.vertexShader = sh.vertexShader
+    .replace('#include <common>', '#include <common>\nattribute vec3 aRest;\nvarying vec3 vRest;')
+    .replace('#include <begin_vertex>', '#include <begin_vertex>\nvRest = aRest;');
+  sh.fragmentShader = sh.fragmentShader
+    .replace('#include <common>', `#include <common>
+uniform float uGrain;
+varying vec3 vRest;
+float hash3(vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
+float vnoise(vec3 x) {
+  vec3 i = floor(x), f = fract(x); f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(mix(hash3(i), hash3(i + vec3(1,0,0)), f.x), mix(hash3(i + vec3(0,1,0)), hash3(i + vec3(1,1,0)), f.x), f.y),
+             mix(mix(hash3(i + vec3(0,0,1)), hash3(i + vec3(1,0,1)), f.x), mix(hash3(i + vec3(0,1,1)), hash3(i + vec3(1,1,1)), f.x), f.y), f.z);
+}`)
+    .replace('#include <color_fragment>', `#include <color_fragment>
+float mot = vnoise(vRest * 4.0) * 0.6 + vnoise(vRest * 15.0) * 0.3 + vnoise(vRest * 55.0) * 0.1;
+diffuseColor.rgb *= 0.93 + 0.14 * mot;`)
+    .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+roughnessFactor = clamp(roughnessFactor * (0.82 + 0.36 * vnoise(vRest * 30.0)), 0.0, 1.0);`)
+    .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
+{
+  float gh = vnoise(vRest * 70.0) * 0.8 + vnoise(vRest * 160.0) * 0.2;
+  vec2 dH = vec2(dFdx(gh), dFdy(gh)) * uGrain;
+  vec3 sX = dFdx(-vViewPosition), sY = dFdy(-vViewPosition);
+  vec3 r1 = cross(sY, normal), r2 = cross(normal, sX);
+  float det = dot(sX, r1);
+  normal = normalize(abs(det) * normal - sign(det) * (dH.x * r1 + dH.y * r2));
+}`);
+};
+const clay = new THREE.Mesh(geo, mat);
+clay.frustumCulled = false; clay.castShadow = true; clay.receiveShadow = true;
+scene.add(clay);
+window.clay = clay;
+const body = { vel: new THREE.Vector3(), ang: new THREE.Vector3() };   // world units/s and rad/s
+newClay();
+
+// ---------- fingers -> sculpting ----------
+const fingerState = new Map();   // key -> { prevW, z, touch, mix, prox }
+const inv = new THREE.Matrix4(), camLocal = new THREE.Vector3(), tmp = new THREE.Vector3();
+function rayPoint(sx, sy, zPlane, out) {   // point on the camera ray through a screen pixel, at world depth zPlane
+  tmp.set(sx / W * 2 - 1, -(sy / H * 2 - 1), 0.5).unproject(camera).sub(camera.position).normalize();
+  const t = (zPlane - camera.position.z) / tmp.z;
+  return out.copy(camera.position).addScaledVector(tmp, t);
+}
+
+let lastShare = 0, contactCount = 0;
+function sculpt(fingers, dt) {
+  for (let i = 0; i < N; i++) heat[i] *= 0.9;
+  touched.fill(0); disp.fill(0);
+  let maxR2 = 0;
+  for (let i = 0; i < 3*N; i += 3) { const d = pos[i]*pos[i] + pos[i+1]*pos[i+1] + pos[i+2]*pos[i+2]; if (d > maxR2) maxR2 = d; }
+  const maxR = Math.sqrt(maxR2), r = P.tipR, r2 = r * r, give = 1 - P.resist;
+  const contacts = [];
+  const ax = camLocal.x, ay = camLocal.y, az = camLocal.z;
+  const tipW = new THREE.Vector3(), tip = new THREE.Vector3(), prev = new THREE.Vector3(), B = new THREE.Vector3();
+
+  for (const f of fingers) {
+    const st = f.st;
+    rayPoint(f.sx, f.sy, st.z, tipW);
+    tip.copy(tipW).applyMatrix4(inv);
+    if (!st.prevW) st.prevW = rayPoint(f.sx, f.sy, P.zStart + 0.4, new THREE.Vector3());
+    prev.copy(st.prevW).applyMatrix4(inv);
+    const n = Math.min(10, Math.max(1, Math.ceil(prev.distanceTo(tip) / (r * 0.5))));
+    let minD2 = Infinity, cnt = 0, jx = 0, jy = 0, jz = 0, cx = 0, cy = 0, cz = 0;
+    for (let s = 1; s <= n; s++) {
+      B.lerpVectors(prev, tip, s / n);
+      // the finger is a capsule from the viewer to the fingertip, so it can also press on the clay's sides
+      const abx = B.x - ax, aby = B.y - ay, abz = B.z - az, abb = abx*abx + aby*aby + abz*abz;
+      let tc = -(ax*abx + ay*aby + az*abz) / abb; tc = tc < 0 ? 0 : tc > 1 ? 1 : tc;
+      const ox = ax + abx*tc, oy = ay + aby*tc, oz = az + abz*tc;
+      if (Math.sqrt(ox*ox + oy*oy + oz*oz) > maxR + r + 0.8) continue;
+      for (let i = 0, i3 = 0; i < N; i++, i3 += 3) {
+        const px = pos[i3], py = pos[i3+1], pz = pos[i3+2];
+        let t = ((px-ax)*abx + (py-ay)*aby + (pz-az)*abz) / abb; t = t < 0 ? 0 : t > 1 ? 1 : t;
+        let dx = px - (ax + abx*t), dy = py - (ay + aby*t), dz = pz - (az + abz*t);
+        const d2 = dx*dx + dy*dy + dz*dz;
+        if (d2 < minD2) minD2 = d2;
+        if (d2 >= r2) continue;
+        let d = Math.sqrt(d2);
+        if (d < 1e-5) { dx = -nrm[i3]; dy = -nrm[i3+1]; dz = -nrm[i3+2]; d = 1e-5; }
+        const k = (r / d - 1) * give, mx = dx*k, my = dy*k, mz = dz*k;
+        pos[i3] = px + mx; pos[i3+1] = py + my; pos[i3+2] = pz + mz;
+        disp[i3] += mx; disp[i3+1] += my; disp[i3+2] += mz;
+        jx += mx; jy += my; jz += mz; cx += px; cy += py; cz += pz; cnt++;
+        touched[i] = 1; heat[i] = 1;
+      }
+    }
+    st.prevW.copy(tipW);
+    const md = Math.sqrt(minD2);
+    st.touch = md < r * (st.touch ? 1.3 : 1.08);
+    st.prox = Math.max(0, Math.min(1, 1 - (md - r) / 0.7));
+    if (cnt) contacts.push({ c: new THREE.Vector3(cx/cnt, cy/cnt, cz/cnt), j: new THREE.Vector3(jx/cnt, jy/cnt, jz/cnt), tip: tip.clone() });
+  }
+  contactCount = contacts.length;
+
+  // split the push: one-sided pushes move/turn the lump, opposing pushes (a squeeze) only shape it
+  const t = new THREE.Vector3(), th = new THREE.Vector3();
+  let mob = 0;
+  if (contacts.length) {
+    let absSum = 0;
+    for (const c of contacts) {
+      t.add(c.j); absSum += c.j.length();
+      th.add(new THREE.Vector3().crossVectors(c.c, c.j).divideScalar(c.c.lengthSq() + 0.15));
+    }
+    lastShare = absSum > 0 ? t.length() / absSum : 0;
+    mob = P.mobility * lastShare;
+    t.multiplyScalar(mob);
+    th.multiplyScalar(P.turn * P.mobility);
+    // what moved the body is not also a dent; the rest spreads softly into the clay around the finger
+    for (let i3 = 0; i3 < 3*N; i3 += 3) { pos[i3] -= disp[i3]*mob; pos[i3+1] -= disp[i3+1]*mob; pos[i3+2] -= disp[i3+2]*mob; }
+    if (P.soft > 0) {
+      const s2 = P.spread * P.spread;
+      for (const c of contacts) {
+        const kx = c.j.x * (1 - mob) * P.soft, ky = c.j.y * (1 - mob) * P.soft, kz = c.j.z * (1 - mob) * P.soft;
+        for (let i = 0, i3 = 0; i < N; i++, i3 += 3) {
+          if (touched[i]) continue;
+          const dx = pos[i3]-c.c.x, dy = pos[i3+1]-c.c.y, dz = pos[i3+2]-c.c.z, d2 = dx*dx + dy*dy + dz*dz;
+          if (d2 > 6 * s2) continue;
+          const g = Math.exp(-d2 / s2);
+          pos[i3] += kx*g; pos[i3+1] += ky*g; pos[i3+2] += kz*g;
+          if (g > 0.2) heat[i] = Math.max(heat[i], g * 0.6);
+        }
+      }
+    }
+  }
+  moveBody(t, th, dt, contacts.length > 0);
+
+  // rubbed areas smooth out a little
+  if (P.smooth > 0) for (let i = 0; i < N; i++) {
+    const h = heat[i]; if (h < 0.03) continue;
+    let a = P.smooth * h * 0.5; if (touched[i]) a *= 0.3;
+    let sx = 0, sy = 0, sz = 0; const s0 = nbStart[i], s1 = nbStart[i+1];
+    for (let q = s0; q < s1; q++) { const j = 3*nbList[q]; sx += pos[j]; sy += pos[j+1]; sz += pos[j+2]; }
+    const m = 1 / (s1 - s0), i3 = 3*i;
+    pos[i3] += (sx*m - pos[i3]) * a; pos[i3+1] += (sy*m - pos[i3+1]) * a; pos[i3+2] += (sz*m - pos[i3+2]) * a;
+  }
+
+  // handled clay slowly loses its corners and rounds off as a whole
+  if (contacts.length && P.rounding > 0) {
+    const a = P.rounding * Math.min(3, contacts.length);
+    for (let i = 0; i < N; i++) {
+      if (touched[i]) continue;
+      let sx = 0, sy = 0, sz = 0; const s0 = nbStart[i], s1 = nbStart[i+1];
+      for (let q = s0; q < s1; q++) { const j = 3*nbList[q]; sx += pos[j]; sy += pos[j+1]; sz += pos[j+2]; }
+      const m = 1 / (s1 - s0), i3 = 3*i;
+      pos[i3] += (sx*m - pos[i3]) * a; pos[i3+1] += (sy*m - pos[i3+1]) * a; pos[i3+2] += (sz*m - pos[i3+2]) * a;
+    }
+  }
+
+  // clay doesn't disappear: lost volume comes back out, mostly around the fingers, a little everywhere
+  const V = measure(); volRatio = V / V0;
+  const deficit = V0 - V;
+  if (P.volKeep > 0 && Math.abs(deficit) > 1e-5) {
+    let sumW = 0; const b2 = P.bulge * P.bulge;
+    for (let i = 0, i3 = 0; i < N; i++, i3 += 3) {
+      let w = 0;
+      if (!touched[i]) {
+        if (contacts.length === 0) w = 1;
+        else {
+          w = 0.12;
+          for (const c of contacts) {
+            const dx = pos[i3]-c.c.x, dy = pos[i3+1]-c.c.y, dz = pos[i3+2]-c.c.z;
+            w += Math.exp(-(dx*dx + dy*dy + dz*dz) / b2);
+          }
+          if (w > 1) w = 1;
+        }
+      }
+      wts[i] = w; sumW += w;
+    }
+    if (sumW > 0) {
+      const k = deficit * P.volKeep / (sumW * area / N);
+      for (let i = 0, i3 = 0; i < N; i++, i3 += 3) {
+        let dl = k * wts[i]; if (dl > 0.012) dl = 0.012; else if (dl < -0.012) dl = -0.012;
+        pos[i3] += nrm[i3]*dl; pos[i3+1] += nrm[i3+1]*dl; pos[i3+2] += nrm[i3+2]*dl;
+      }
+    }
+  }
+
+  // keep the lump's centre at its own origin, so it turns around its middle
+  let mx = 0, my = 0, mz = 0;
+  for (let i3 = 0; i3 < 3*N; i3 += 3) { mx += pos[i3]; my += pos[i3+1]; mz += pos[i3+2]; }
+  mx /= N; my /= N; mz /= N;
+  for (let i3 = 0; i3 < 3*N; i3 += 3) { pos[i3] -= mx; pos[i3+1] -= my; pos[i3+2] -= mz; }
+  clay.position.add(tmp.set(mx, my, mz).applyQuaternion(clay.quaternion));
+
+  geo.attributes.position.needsUpdate = true;
+  geo.computeVertexNormals();
+  updateCavity();
+}
+
+// ---------- the lump as a body you can push, move and turn ----------
+const qTmp = new THREE.Quaternion(), aTmp = new THREE.Vector3(), wTmp = new THREE.Vector3();
+let wheelOn = false;
+function rotateWorld(a) {
+  const ang = a.length(); if (ang < 1e-7) return;
+  qTmp.setFromAxisAngle(aTmp.copy(a).divideScalar(ang), ang);
+  clay.quaternion.premultiply(qTmp).normalize();
+}
+function moveBody(tLocal, thLocal, dt, touching) {
+  const sdt = Math.max(dt, 1 / 120);
+  if (touching) {
+    wTmp.copy(tLocal).applyQuaternion(clay.quaternion);
+    wTmp.z *= 0.35;   // pressing toward the screen mostly dents rather than shoving it away
+    clay.position.add(wTmp);
+    body.vel.lerp(wTmp.divideScalar(sdt), 0.35);
+    wTmp.copy(thLocal).applyQuaternion(clay.quaternion);
+    rotateWorld(wTmp);
+    body.ang.lerp(wTmp.divideScalar(sdt), 0.35);
+  } else {
+    clay.position.addScaledVector(body.vel, dt);
+    rotateWorld(wTmp.copy(body.ang).multiplyScalar(dt));
+    const k = Math.exp(-P.drag * dt);
+    body.vel.multiplyScalar(k); body.ang.multiplyScalar(k);
+    body.vel.addScaledVector(clay.position, -P.home * dt);
+  }
+  if (wheelOn) rotateWorld(wTmp.set(0, P.wheel * dt, 0));
+  if (clay.position.length() > 1.6) clay.position.setLength(1.6);
+}
+
+// ---------- hand tracking ----------
+let landmarker = null, hands = [], labels = [], lastVT = -1, detMs = 0;
+const palm = {};   // smoothed palm size per hand
+const camBtn = document.getElementById('cam');
+camBtn.onclick = async () => {
+  if (landmarker) return;
+  camBtn.textContent = '… loading';
+  let step = 'camera';
+  try {
+    // ask for the camera first, while the tap still counts (iPhone Safari needs this)
+    if (!video.srcObject) {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('needs https');
+      video.srcObject = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+      await video.play();
+    }
+    step = 'hand model';
+    const { HandLandmarker, FilesetResolver } =
+      await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs');
+    const fileset = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+    const opts = (delegate) => ({
+      baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task', delegate },
+      runningMode: 'VIDEO', numHands: 2,
+    });
+    try { landmarker = await HandLandmarker.createFromOptions(fileset, opts('GPU')); }
+    catch { landmarker = await HandLandmarker.createFromOptions(fileset, opts('CPU')); }
+    camBtn.textContent = '✋ Camera on'; camBtn.classList.add('on');
+  } catch (e) {
+    console.error(e); landmarker = null;
+    const why = e && e.name === 'NotAllowedError' ? 'camera blocked — allow it in the browser'
+      : e && e.message === 'needs https' ? 'camera needs https' : `${step} failed`;
+    camBtn.textContent = `✋ ${why} — retry`;
+  }
+};
+
+function detect() {
+  if (!landmarker || video.readyState < 2 || video.currentTime === lastVT) return;
+  lastVT = video.currentTime;
+  const t0 = performance.now();
+  const res = landmarker.detectForVideo(video, t0);
+  detMs = performance.now() - t0;
+  hands = res.landmarks || [];
+  const hd = res.handedness || res.handednesses || [];
+  labels = hands.map((_, i) => (hd[i] && hd[i][0] && hd[i][0].categoryName) || 'H');
+  if (labels.length === 2 && labels[0] === labels[1]) labels[1] += '2';
+}
+
+function toScreen(lm) {   // mirrored, video covering the screen
+  const vw = video.videoWidth || 1280, vh = video.videoHeight || 720, va = vw / vh;
+  if (W / H > va) { const dh = W / va; return [(1 - lm.x) * W, (H - dh) / 2 + lm.y * dh]; }
+  const dw = H * va; return [(W - dw) / 2 + (1 - lm.x) * dw, lm.y * H];
+}
+
+const TIPS = [4, 8, 12, 16, 20];
+const CHAINS = [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16], [17, 18, 19, 20]];
+const PALM = [[0, 1], [0, 5], [5, 9], [9, 13], [13, 17], [0, 17]];
+const handInfo = [];   // per frame, for drawing and the log
+
+const mouse = { down: false, x: 0, y: 0, z: 0 };
+glCanvas.addEventListener('pointerdown', e => { mouse.down = true; mouse.x = e.clientX; mouse.y = e.clientY; mouse.z = P.zStart; glCanvas.setPointerCapture(e.pointerId); });
+glCanvas.addEventListener('pointermove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+const up = () => { mouse.down = false; };
+glCanvas.addEventListener('pointerup', up); glCanvas.addEventListener('pointercancel', up);
+
+function getState(key) {
+  let st = fingerState.get(key);
+  if (!st) { st = { prevW: null, z: P.zStart + 0.4, touch: false, mix: 0, prox: 0 }; fingerState.set(key, st); }
+  st.seen = true; return st;
+}
+
+function gatherFingers(dt) {
+  const fingers = [];
+  for (const st of fingerState.values()) st.seen = false;
+  handInfo.length = 0;
+  const vw = video.videoWidth || 1280, vh = video.videoHeight || 720;
+  hands.forEach((lm, h) => {
+    const label = labels[h];
+    const d = (a, b) => Math.hypot((lm[a].x - lm[b].x) * vw / vh, lm[a].y - lm[b].y);
+    const raw = Math.max(d(0, 9), d(5, 17) * 1.6);
+    palm[label] = palm[label] == null ? raw : palm[label] + (raw - palm[label]) * 0.35;
+    const s = palm[label];
+    const push = Math.max(0, Math.min(1, (s - P.sFar) / (P.sNear - P.sFar))) * P.pushRange;
+    const info = { label, s, push, pts: lm.map(toScreen), fingers: [] };
+    TIPS.forEach((ti, fi) => {
+      const st = getState(label + fi);
+      const zt = Math.max(-1.8, P.zStart - push + lm[ti].z * P.fingerDepth);
+      st.z += (zt - st.z) * 0.5;
+      const [sx, sy] = info.pts[ti];
+      fingers.push({ sx, sy, st });
+      info.fingers.push(st);
+    });
+    handInfo.push(info);
+  });
+  if (mouse.down) {
+    const st = getState('mouse');
+    st.z = Math.max(0.0, Math.min(mouse.z, st.z) - P.mouseRate * dt); mouse.z = st.z;
+    fingers.push({ sx: mouse.x, sy: mouse.y, st, mouse: true });
+  }
+  for (const f of (window.__fakeFingers || [])) {   // test hook: [{key, sx, sy, z}]
+    const st = getState('fake' + f.key); st.z = f.z;
+    fingers.push({ sx: f.sx, sy: f.sy, st, mouse: true });
+  }
+  for (const [k, st] of fingerState) if (!st.seen) fingerState.delete(k);
+  return fingers;
+}
+
+// ---------- drawing the hand skeleton ----------
+function fingerColor(mix, a = 1) {
+  const r = Math.round(255 + (40 - 255) * mix), g = Math.round(59 + (235 - 59) * mix), b = Math.round(59 + (110 - 59) * mix);
+  return `rgba(${r},${g},${b},${a})`;
+}
+function drawTip(x, y, st) {
+  if (!st.touch && st.prox > 0) {   // ring closes in as the finger nears the clay
+    sk.beginPath(); sk.arc(x, y, 9 + 22 * (1 - st.prox), 0, Math.PI * 2);
+    sk.strokeStyle = fingerColor(st.mix, 0.25 + 0.5 * st.prox); sk.lineWidth = 2; sk.stroke();
+  }
+  sk.beginPath(); sk.arc(x, y, st.touch ? 9 : 7, 0, Math.PI * 2);
+  sk.fillStyle = fingerColor(st.mix); sk.fill();
+}
+function drawSkeleton(fingers) {
+  sk.clearRect(0, 0, W, H);
+  for (const st of fingerState.values()) st.mix += ((st.touch ? 1 : 0) - st.mix) * 0.35;
+  sk.lineCap = 'round'; sk.lineJoin = 'round';
+  for (const info of handInfo) {
+    const p = info.pts;
+    sk.strokeStyle = 'rgba(255,255,255,.45)'; sk.lineWidth = 3;
+    sk.beginPath(); for (const [a, b] of PALM) { sk.moveTo(...p[a]); sk.lineTo(...p[b]); } sk.stroke();
+    CHAINS.forEach((ch, fi) => {
+      const st = info.fingers[fi];
+      sk.strokeStyle = fingerColor(st.mix); sk.lineWidth = 4;
+      sk.beginPath(); sk.moveTo(...p[fi === 0 ? 0 : ch[0]]);
+      for (const j of ch) sk.lineTo(...p[j]); sk.stroke();
+      sk.fillStyle = fingerColor(st.mix, 0.9);
+      for (const j of ch.slice(0, 3)) { sk.beginPath(); sk.arc(...p[j], 3.5, 0, Math.PI * 2); sk.fill(); }
+      drawTip(...p[ch[3]], st);
+    });
+    sk.fillStyle = 'rgba(255,255,255,.8)'; sk.beginPath(); sk.arc(...p[0], 5, 0, Math.PI * 2); sk.fill();
+  }
+  for (const f of fingers) if (f.mouse) drawTip(f.sx, f.sy, f.st);
+}
+
+// ---------- buttons ----------
+document.getElementById('reset').onclick = newClay;
+const wheelBtn = document.getElementById('wheel');
+wheelBtn.onclick = () => { wheelOn = !wheelOn; wheelBtn.classList.toggle('on', wheelOn); };
+
+// ---------- debug overlay + log ----------
+const logLines = [];
+let fps = 0, lastLog = 0;
+if (DEBUG) {
+  document.getElementById('debugPanel').style.display = 'block';
+  const box = document.getElementById('params');
+  for (const k in P) {
+    const row = document.createElement('div'); row.className = 'row';
+    const lab = document.createElement('span');
+    const show = () => lab.textContent = `${k} ${+P[k].toFixed(4)}`;
+    const mk = (txt, sgn) => { const b = document.createElement('button'); b.textContent = txt;
+      b.onclick = () => { P[k] = +clampP(k, P[k] + sgn * LIMITS[k][2]).toFixed(4); grainU.value = P.grain; show(); writeUrl(); }; return b; };
+    show(); row.append(lab, mk('−', -1), mk('+', 1)); box.append(row);
+  }
+  document.getElementById('saveLog').onclick = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([logHeader() + logLines.join('\n')], { type: 'text/plain' }));
+    a.download = `clay-log-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.txt`; a.click();
+  };
+  document.getElementById('copyLog').onclick = () => navigator.clipboard.writeText(logHeader() + logLines.join('\n'));
+}
+function writeUrl() {
+  const u = new URLSearchParams(); u.set('debug', '');
+  for (const k in P) if (P[k] !== DEFAULT_PARAMS[k]) u.set(k, P[k]);
+  history.replaceState(null, '', '?' + u.toString().replace('debug=', 'debug'));
+}
+const logHeader = () => `clay log ${new Date().toISOString()} ${innerWidth}x${innerHeight} ${navigator.userAgent}\nparams ${JSON.stringify(P)}\n`;
+function sampleLog(t) {
+  const fmt = st => `z=${st.z.toFixed(2)}${st.touch ? '*' : ''}`;
+  const p = clay.position;
+  let s = `t=${t.toFixed(2)} fps=${fps.toFixed(0)} det=${detMs.toFixed(1)}ms vol=${volRatio.toFixed(3)} hands=${handInfo.length}` +
+    ` contacts=${contactCount} share=${lastShare.toFixed(2)} pos=${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)} spin=${body.ang.length().toFixed(2)}`;
+  for (const h of handInfo) s += `\n  ${h.label} palm=${h.s.toFixed(3)} push=${h.push.toFixed(2)} | ${h.fingers.map(fmt).join(' ')}`;
+  const m = fingerState.get('mouse'); if (m) s += `\n  mouse ${fmt(m)}`;
+  logLines.push(s); if (logLines.length > 2400) logLines.shift();
+  if (DEBUG) document.getElementById('stats').textContent =
+    `fps ${fps.toFixed(0)}  detect ${detMs.toFixed(1)}ms\nverts ${N}  clay volume ${(volRatio * 100).toFixed(1)}%\n` +
+    `contacts ${contactCount}  one-sided ${lastShare.toFixed(2)}\n` +
+    handInfo.map(h => `${h.label} palm ${h.s.toFixed(3)} push ${h.push.toFixed(2)}\n ${h.fingers.map(st => (st.touch ? '●' : '○') + st.z.toFixed(2)).join(' ')}`).join('\n');
+}
+
+// ---------- loop ----------
+let last = performance.now(), t0 = last, hintGone = false;
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  fps += ((dt > 0 ? 1 / dt : 60) - fps) * 0.05;
+  detect();
+  clay.updateMatrixWorld();
+  inv.copy(clay.matrixWorld).invert();
+  camLocal.copy(camera.position).applyMatrix4(inv);
+  const fingers = gatherFingers(dt);
+  sculpt(fingers, dt);
+  drawSkeleton(fingers);
+  renderer.render(scene, camera);
+  if (!hintGone && fingers.length) { hintGone = true; setTimeout(() => hint.style.opacity = 0, 2500); }
+  if (now - lastLog > 250) { lastLog = now; sampleLog((now - t0) / 1000); }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
