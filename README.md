@@ -24,18 +24,18 @@ Add `?debug` for live numbers, +/- buttons per parameter (the address updates so
 | fingerDepth | 3.0 | extra depth from a fingertip leaning toward the camera |
 | zStart | 1.4 | depth of a far hand (block front is around 0.6) |
 | tipR | 0.13 | fingertip size |
-| give | 0.75 | how much the clay follows a finger moving into it (replaced the time-based `pressSpeed` 0.35, which kept pressing while a finger stood still) |
+| give | 0.4 (firmer clay; was 0.75) | how much the clay follows a finger moving into it (replaced the time-based `pressSpeed` 0.35, which kept pressing while a finger stood still) |
 | steady | 0.35 | hand tracking smoothing, lower = steadier |
 | grabTurn | 1.0 | two hands: how much turning the hands turns the clay |
 | grabMove | 0.8 | two hands: how much moving the hands moves the clay |
-| squeeze | 0.8 | two hands: how strongly hand distance squeezes/stretches the shape |
-| soft | 0.55 | how much clay around the fingertip goes along with it |
+| squeeze | 0.5 (firmer clay; was 0.8) | two hands: how strongly hand distance squeezes/stretches the shape |
+| soft | 0.35 (firmer clay; was 0.55) | how much clay around the fingertip goes along with it |
 | spread | 0.32 | how wide that soft area is |
-| rounding | 0.012 | how much pressing rounds off the whole lump |
+| rounding | 0.006 (firmer clay; was 0.012) | how much pressing rounds off the whole lump |
 | volKeep | 0.35 | how fast pushed-in clay comes back out (was 0.5) |
 | bulge | 1.0 | how wide the returning clay spreads around the fingers (your tuning, was 0.5) |
 | overall | 0.7 | share of returning clay that goes into the whole shape instead of a rim (was 0.12: too much bulging) |
-| smooth | 0.2 | smoothing where fingers rub |
+| smooth | 0.1 (firmer clay; was 0.2) | smoothing where fingers rub |
 | mobility | 0.8 | how much a one-sided push moves the lump instead of denting it (was 0.45: carved grooves instead of moving) |
 | turn | 1.0 | how easily off-centre pushes turn it (was 0.7) |
 | drag | 2.5 | how fast it stops drifting/spinning after you let go |

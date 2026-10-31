@@ -60,18 +60,18 @@ const DEFAULT_PARAMS = {
   fingerDepth: 3.0, // extra depth from each fingertip leaning toward the camera
   zStart: 1.4,      // depth of a far hand (the block's front is around 0.6)
   tipR: 0.13,       // fingertip size (the soft press area is 1.8x this)
-  give: 0.75,       // how much the clay follows a finger moving into it (only movement presses, holding still does nothing)
+  give: 0.4,        // how much the clay follows a finger moving into it (only movement presses, holding still does nothing)
   steady: 0.35,     // hand tracking smoothing (lower = steadier but slower to follow)
   grabTurn: 1.0,    // two hands touching: how much turning the hands turns the clay
   grabMove: 0.8,    // two hands touching: how much moving the hands moves the clay
-  squeeze: 0.8,     // two hands touching: hands closer = clay squeezed thinner and wider
-  soft: 0.55,       // how much the clay around a fingertip goes along with it (deeper, softer dents)
+  squeeze: 0.5,     // two hands touching: hands closer = clay squeezed thinner and wider
+  soft: 0.35,       // how much the clay around a fingertip goes along with it (deeper, softer dents)
   spread: 0.32,     // how wide that soft area is
-  rounding: 0.012,  // pressing slowly rounds off the whole lump (the more you press, the rounder)
+  rounding: 0.006,  // pressing slowly rounds off the whole lump (the more you press, the rounder)
   volKeep: 0.35,    // how fast pushed-in clay comes back out somewhere (keeps the amount of clay)
   bulge: 1.0,       // how far around the finger the returning clay is focused
   overall: 0.7,     // share of returning clay that goes into the whole lump's shape instead of a rim by the finger
-  smooth: 0.2,      // smoothing where fingers rub
+  smooth: 0.1,      // smoothing where fingers rub
   mobility: 0.8,    // a one-sided push moves the lump instead of only denting it
   turn: 1.0,        // how easily off-centre pushes turn the lump
   drag: 2.5,        // how fast the lump stops drifting / spinning after you let go
