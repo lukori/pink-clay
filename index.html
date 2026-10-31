@@ -65,12 +65,12 @@ const DEFAULT_PARAMS = {
   grabTurn: 1.0,    // two hands touching: how much turning the hands turns the clay
   grabMove: 0.8,    // two hands touching: how much moving the hands moves the clay
   squeeze: 0.5,     // two hands touching: hands closer = clay squeezed thinner and wider
-  soft: 0.35,       // how much the clay around a fingertip goes along with it (deeper, softer dents)
-  spread: 0.32,     // how wide that soft area is
+  spread: 0.16,     // size of the clay region that moves with a fingertip push (solid-clay push, bigger = broader)
+  direct: 0.3,      // share of the push that presses straight in under the fingertip (finger-shaped marks)
   rounding: 0.006,  // pressing slowly rounds off the whole lump (the more you press, the rounder)
-  volKeep: 0.35,    // how fast pushed-in clay comes back out somewhere (keeps the amount of clay)
+  volKeep: 0.2,     // how fast pushed-in clay comes back out somewhere (keeps the amount of clay)
   bulge: 1.0,       // how far around the finger the returning clay is focused
-  overall: 0.7,     // share of returning clay that goes into the whole lump's shape instead of a rim by the finger
+  overall: 1.0,     // share of returning clay that goes into the whole lump's shape instead of a rim by the finger
   smooth: 0.1,      // smoothing where fingers rub
   mobility: 0.8,    // a one-sided push moves the lump instead of only denting it
   turn: 1.0,        // how easily off-centre pushes turn the lump
@@ -84,8 +84,8 @@ const DEFAULT_PARAMS = {
 const LIMITS = {
   sFar: [0.03, 0.4, 0.01], sNear: [0.05, 0.6, 0.01], pushRange: [0.5, 5, 0.1], fingerDepth: [0, 8, 0.25],
   zStart: [0.8, 3, 0.1], tipR: [0.05, 0.4, 0.01], give: [0.05, 1, 0.05], steady: [0.05, 1, 0.05],
-  grabTurn: [0, 2, 0.1], grabMove: [0, 2, 0.1], squeeze: [0, 2, 0.1], soft: [0, 1, 0.05],
-  spread: [0.1, 0.8, 0.02], rounding: [0, 0.06, 0.002], volKeep: [0, 1, 0.05], bulge: [0.15, 1.5, 0.05], overall: [0, 1, 0.05],
+  grabTurn: [0, 2, 0.1], grabMove: [0, 2, 0.1], squeeze: [0, 2, 0.1], direct: [0, 1, 0.05],
+  spread: [0.05, 0.5, 0.01], rounding: [0, 0.06, 0.002], volKeep: [0, 1, 0.05], bulge: [0.15, 1.5, 0.05], overall: [0, 1, 0.05],
   smooth: [0, 1, 0.05], mobility: [0, 1, 0.05], turn: [0, 2, 0.05], drag: [0.2, 10, 0.1], home: [0, 4, 0.1],
   cavity: [0, 0.5, 0.01], grain: [0, 0.03, 0.001], wheel: [0, 3, 0.1], mouseRate: [0.3, 5, 0.1],
 };
@@ -285,6 +285,24 @@ function rayPoint(sx, sy, zPlane, out) {   // point on the camera ray through a 
 }
 
 let lastShare = 0, contactCount = 0;
+// Bi-scale regularized Kelvinlet (de Goes & James 2017): how an elastic, nearly incompressible solid moves
+// when pushed at one point. Neighbouring clay moves together, so it dents, smears and bulges but never tears into strings.
+const KA = 1, KB = KA / (4 * (1 - 0.45));
+const kA0 = (e) => (KA - KB) / e + KA / (2 * e);
+function kelvinlet(c, f, e1, e2) {
+  const s = 1 / (kA0(e1) - kA0(e2));   // so the clay right at the push moves by exactly f
+  const fx = f.x * s, fy = f.y * s, fz = f.z * s, cut2 = (e2 * 5) * (e2 * 5);
+  const e1s = e1 * e1, e2s = e2 * e2;
+  for (let i3 = 0; i3 < 3*N; i3 += 3) {
+    const rx = pos[i3] - c.x, ry = pos[i3+1] - c.y, rz = pos[i3+2] - c.z, r2 = rx*rx + ry*ry + rz*rz;
+    if (r2 > cut2) continue;
+    const q1 = r2 + e1s, a1 = Math.sqrt(q1), b1 = a1 * q1, q2 = r2 + e2s, a2 = Math.sqrt(q2), b2 = a2 * q2;
+    const A = (KA - KB) / a1 + KA * e1s / (2 * b1) - (KA - KB) / a2 - KA * e2s / (2 * b2);
+    const Bc = KB / b1 - KB / b2, rf = (rx*fx + ry*fy + rz*fz) * Bc;
+    pos[i3] += A*fx + rf*rx; pos[i3+1] += A*fy + rf*ry; pos[i3+2] += A*fz + rf*rz;
+  }
+}
+
 function sculpt(fingers, dt) {
   for (let i = 0; i < N; i++) heat[i] *= 0.7;
   touched.fill(0); disp.fill(0);
@@ -305,7 +323,8 @@ function sculpt(fingers, dt) {
     // only moving into the clay presses it; holding with both hands presses gently so turning doesn't carve
     const give = P.give * (grab.on ? 0.35 : 1);
     const P0 = new THREE.Vector3();
-    let minD2 = Infinity, cnt = 0, jx = 0, jy = 0, jz = 0, cx = 0, cy = 0, cz = 0, ux = 0, uy = 0, uz = 0;
+    let minD2 = Infinity, cnt = 0, jx = 0, jy = 0, jz = 0, cx = 0, cy = 0, cz = 0;
+    let ux = 0, uy = 0, uz = 0, uw = 0, qx = 0, qy = 0, qz = 0;   // the finger's push, and where it lands
     for (let s = 1; s <= n; s++) {
       P0.lerpVectors(prev, tip, (s - 1) / n);
       B.lerpVectors(prev, tip, s / n);
@@ -334,9 +353,11 @@ function sculpt(fingers, dt) {
         if (inc <= 0) continue;
         heat[i] = 1;
         // soft round pad: the middle of the fingertip pushes fully, toward the edge it fades out
-        const fall = 1 - d / r, k = inc * give * (0.25 + 0.75 * fall) / d;
-        pos[i3] = px + dx*k; pos[i3+1] = py + dy*k; pos[i3+2] = pz + dz*k;
-        disp[i3] += dx*k; disp[i3+1] += dy*k; disp[i3+2] += dz*k; ux += dx*k; uy += dy*k; uz += dz*k;
+        const pad = 0.25 + 0.75 * (1 - d / r), kd = inc * pad / d;
+        ux += dx*kd; uy += dy*kd; uz += dz*kd; uw += pad; qx += px*pad; qy += py*pad; qz += pz*pad;
+        // a little presses straight into the surface (along its normal, never sideways: no smearing into sheets)
+        const kn = inc * pad * give * P.direct;
+        disp[i3] -= nrm[i3]*kn; disp[i3+1] -= nrm[i3+1]*kn; disp[i3+2] -= nrm[i3+2]*kn;
         const kw = inc / d;   // the finger's new push: what a free-floating lump would be shoved by
         jx += dx*kw; jy += dy*kw; jz += dz*kw;
       }
@@ -345,8 +366,13 @@ function sculpt(fingers, dt) {
     const md = Math.sqrt(minD2);
     st.touch = md < r * (st.touch ? 1.0 : 0.8);
     st.prox = Math.max(0, Math.min(1, 1 - (md - r * 0.8) / 0.7));
-    if (cnt) contacts.push({ c: new THREE.Vector3(cx/cnt, cy/cnt, cz/cnt), j: new THREE.Vector3(jx/cnt, jy/cnt, jz/cnt),
-      m: new THREE.Vector3(ux/cnt, uy/cnt, uz/cnt), tip: tip.clone() });
+    if (cnt) {
+      // the push this frame: average over the pad, summed over the substeps
+      const m = uw > 0 ? new THREE.Vector3(ux, uy, uz).multiplyScalar(n / uw * give * (1 - P.direct)) : new THREE.Vector3();
+      if (m.length() > 0.06) m.setLength(0.06);
+      const at = uw > 0 ? new THREE.Vector3(qx/uw, qy/uw, qz/uw) : new THREE.Vector3(cx/cnt, cy/cnt, cz/cnt);
+      contacts.push({ c: new THREE.Vector3(cx/cnt, cy/cnt, cz/cnt), j: new THREE.Vector3(jx/cnt, jy/cnt, jz/cnt), m, at, tip: tip.clone() });
+    }
   }
   contactCount = contacts.length;
 
@@ -363,22 +389,17 @@ function sculpt(fingers, dt) {
     const mob = grab.on ? 0 : P.mobility * lastShare * 0.5;
     t.multiplyScalar(mob);
     th.multiplyScalar(grab.on ? 0 : P.turn * P.mobility * 0.5);
-    // the dent spreads softly into the clay around the finger
-    if (P.soft > 0) {
-      const s2 = P.spread * P.spread;
-      for (const c of contacts) {
-        const kx = c.m.x * P.soft, ky = c.m.y * P.soft, kz = c.m.z * P.soft;
-        for (let i = 0, i3 = 0; i < N; i++, i3 += 3) {
-          if (touched[i]) continue;
-          const dx = pos[i3]-c.c.x, dy = pos[i3+1]-c.c.y, dz = pos[i3+2]-c.c.z, d2 = dx*dx + dy*dy + dz*dz;
-          if (d2 > 6 * s2) continue;
-          const g = Math.exp(-d2 / s2);
-          pos[i3] += kx*g; pos[i3+1] += ky*g; pos[i3+2] += kz*g;
-          if (g > 0.2) heat[i] = Math.max(heat[i], g * 0.6);
-        }
-      }
-    }
   }
+  // apply: the direct presses (smoothed a little so they stay round), then each push moves the clay as a solid
+  for (let pass = 0; pass < 2; pass++) for (let i = 0; i < N; i++) {
+    if (!touched[i]) continue;
+    let sx = 0, sy = 0, sz = 0; const s0 = nbStart[i], s1 = nbStart[i+1];
+    for (let q = s0; q < s1; q++) { const j = 3*nbList[q]; sx += disp[j]; sy += disp[j+1]; sz += disp[j+2]; }
+    const m = 1 / (s1 - s0), i3 = 3*i;
+    disp[i3] = (disp[i3] + sx*m) / 2; disp[i3+1] = (disp[i3+1] + sy*m) / 2; disp[i3+2] = (disp[i3+2] + sz*m) / 2;
+  }
+  for (let i3 = 0; i3 < 3*N; i3++) pos[i3] += disp[i3];
+  for (const c of contacts) if (c.m.lengthSq() > 1e-12) kelvinlet(c.at, c.m, P.spread, P.spread * 3);
   moveBody(t, th, dt, contacts.length > 0 && !grab.on);
 
   // rubbed areas smooth out a little
